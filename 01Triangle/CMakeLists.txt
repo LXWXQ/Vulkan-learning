@@ -14,8 +14,8 @@ set(Vulkan_LIBRARY "${VULKAN_ROOT}/Lib/vulkan-1.lib")
 find_package(Vulkan REQUIRED)
 
 # 2. 修正 GLFW 和 GLM 路径 (同样改用正斜杠 /)
-set(GLFW_DIR "C:/Users/Admin/Desktop/Vs code Demo/3rdParty/glfw")
-set(GLM_DIR "C:/Users/Admin/Desktop/Vs code Demo/3rdParty/glm")
+set(GLFW_DIR "${CMAKE_CURRENT_BINARY_DIR}/3rdParty/glfw")
+set(GLM_DIR "${CMAKE_CURRENT_BINARY_DIR}/3rdParty/glm")
 
 # 3. 寻找依赖
 find_package(glfw3 REQUIRED)
