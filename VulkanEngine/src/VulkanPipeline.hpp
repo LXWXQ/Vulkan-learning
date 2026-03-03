@@ -5,7 +5,8 @@
 #include <vector>
 
 // 哨兵架构：管线配置清单。把所有固定的状态变量抽离出来，让外部可以定制。
-struct PipelineConfigInfo {
+struct PipelineConfigInfo 
+{
     VkViewport viewport;
     VkRect2D scissor;
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo;
@@ -13,12 +14,14 @@ struct PipelineConfigInfo {
     VkPipelineMultisampleStateCreateInfo multisampleInfo;
     VkPipelineColorBlendAttachmentState colorBlendAttachment;
     VkPipelineColorBlendStateCreateInfo colorBlendInfo;
+    VkPipelineDepthStencilStateCreateInfo depthStencilInfo;
     VkPipelineLayout pipelineLayout = nullptr;
     VkRenderPass renderPass = nullptr;
     uint32_t subpass = 0;
 };
 
-class VulkanPipeline {
+class VulkanPipeline 
+{
 public:
     // 构造函数：需要硬件设备、Shader 路径、以及一份配置清单
     VulkanPipeline(VulkanDevice& device, const std::string& vertFilepath, const std::string& fragFilepath, const PipelineConfigInfo& configInfo);

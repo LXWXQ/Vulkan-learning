@@ -5,19 +5,23 @@
 #include <iostream>
 
 VulkanPipeline::VulkanPipeline(VulkanDevice& device, const std::string& vertFilepath, const std::string& fragFilepath, const PipelineConfigInfo& configInfo)
-    : device(device) {
+    : device(device) 
+    {
     createGraphicsPipeline(vertFilepath, fragFilepath, configInfo);
 }
 
-VulkanPipeline::~VulkanPipeline() {
+VulkanPipeline::~VulkanPipeline() 
+{
     vkDestroyShaderModule(device.getDevice(), vertShaderModule, nullptr);
     vkDestroyShaderModule(device.getDevice(), fragShaderModule, nullptr);
     vkDestroyPipeline(device.getDevice(), graphicsPipeline, nullptr);
 }
 
-std::vector<char> VulkanPipeline::readFile(const std::string& filepath) {
+std::vector<char> VulkanPipeline::readFile(const std::string& filepath)
+{
     std::ifstream file(filepath, std::ios::ate | std::ios::binary);
-    if (!file.is_open()) {
+    if (!file.is_open()) 
+    {
         throw std::runtime_error("failed to open file: " + filepath);
     }
     size_t fileSize = (size_t)file.tellg();
@@ -28,7 +32,8 @@ std::vector<char> VulkanPipeline::readFile(const std::string& filepath) {
     return buffer;
 }
 
-void VulkanPipeline::createGraphicsPipeline(const std::string& vertFilepath, const std::string& fragFilepath, const PipelineConfigInfo& configInfo) {
+void VulkanPipeline::createGraphicsPipeline(const std::string& vertFilepath, const std::string& fragFilepath, const PipelineConfigInfo& configInfo) 
+{
     auto vertCode = readFile(vertFilepath);
     auto fragCode = readFile(fragFilepath);
 
@@ -80,7 +85,7 @@ void VulkanPipeline::createGraphicsPipeline(const std::string& vertFilepath, con
     pipelineInfo.pRasterizationState = &configInfo.rasterizationInfo;
     pipelineInfo.pMultisampleState = &configInfo.multisampleInfo;
     pipelineInfo.pColorBlendState = &configInfo.colorBlendInfo;
-    pipelineInfo.pDepthStencilState = nullptr; // 目前不画 3D，暂时不需要深度测试
+    pipelineInfo.pDepthStencilState = &configInfo.depthStencilInfo;
     pipelineInfo.pDynamicState = nullptr;
 
     pipelineInfo.layout = configInfo.pipelineLayout;
@@ -89,28 +94,33 @@ void VulkanPipeline::createGraphicsPipeline(const std::string& vertFilepath, con
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
     pipelineInfo.basePipelineIndex = -1;
 
-    if (vkCreateGraphicsPipelines(device.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) 
+    {
         throw std::runtime_error("failed to create graphics pipeline!");
     }
 }
 
-void VulkanPipeline::createShaderModule(const std::vector<char>& code, VkShaderModule* shaderModule) {
+void VulkanPipeline::createShaderModule(const std::vector<char>& code, VkShaderModule* shaderModule) 
+{
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     createInfo.codeSize = code.size();
     createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
-    if (vkCreateShaderModule(device.getDevice(), &createInfo, nullptr, shaderModule) != VK_SUCCESS) {
+    if (vkCreateShaderModule(device.getDevice(), &createInfo, nullptr, shaderModule) != VK_SUCCESS) 
+    {
         throw std::runtime_error("failed to create shader module!");
     }
 }
 
-void VulkanPipeline::bind(VkCommandBuffer commandBuffer) {
+void VulkanPipeline::bind(VkCommandBuffer commandBuffer) 
+{
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 }
 
 // 帮助函数：填充一套画普通三角形的标准参数
-void VulkanPipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, uint32_t width, uint32_t height) {
+void VulkanPipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, uint32_t width, uint32_t height) 
+{
     configInfo.inputAssemblyInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     configInfo.inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     configInfo.inputAssemblyInfo.primitiveRestartEnable = VK_FALSE;
@@ -145,4 +155,11 @@ void VulkanPipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, u
     configInfo.colorBlendInfo.logicOpEnable = VK_FALSE;
     configInfo.colorBlendInfo.attachmentCount = 1;
     configInfo.colorBlendInfo.pAttachments = &configInfo.colorBlendAttachment;
+
+    configInfo.depthStencilInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    configInfo.depthStencilInfo.depthTestEnable = VK_TRUE;
+    configInfo.depthStencilInfo.depthWriteEnable = VK_TRUE;
+    configInfo.depthStencilInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+    configInfo.depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
+    configInfo.depthStencilInfo.stencilTestEnable = VK_FALSE;
 }

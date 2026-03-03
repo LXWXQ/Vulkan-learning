@@ -5,7 +5,8 @@
 #include <vector>
 #include <memory>
 
-class VulkanSwapchain {
+class VulkanSwapchain 
+{
 public:
     // 构造函数：强依赖一个 VulkanDevice 实例，并传入窗口分辨率
     VulkanSwapchain(VulkanDevice& deviceRef, VkExtent2D windowExtent);
@@ -25,11 +26,11 @@ public:
 
     // 哨兵提醒：相框的创建必须延后，因为它需要外部传入一个“工序单”(RenderPass)
     void createFramebuffers(VkRenderPass renderPass);
-
+    VkImageView getDepthImageView() { return depthImageView; }
 private:
     void createSwapChain();
     void createImageViews();
-
+    void createDepthResources();
     // --- 核心成员变量 ---
     VulkanDevice& device; // 这是一个引用！代表它不拥有设备，只是使用设备
     VkExtent2D windowExtent;
@@ -40,4 +41,9 @@ private:
     std::vector<VkFramebuffer> swapChainFramebuffers;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
+
+    VkFormat depthFormat;
+    VkImage depthImage;
+    VkDeviceMemory depthImageMemory;
+    VkImageView depthImageView;
 };

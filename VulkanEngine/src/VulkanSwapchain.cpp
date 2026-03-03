@@ -1,17 +1,22 @@
 #include "VulkanSwapchain.hpp"
 #include <stdexcept>
-
+#include <array>
 // 构造函数：顺藤摸瓜，初始化传送带和护目镜
 VulkanSwapchain::VulkanSwapchain(VulkanDevice& deviceRef, VkExtent2D windowExtent)
     : device(deviceRef), windowExtent(windowExtent) 
 {
     createSwapChain();
     createImageViews();
+    createDepthResources();
 }
 
 // 析构函数：砸碎相框、护目镜和传送带
 VulkanSwapchain::~VulkanSwapchain() 
 {
+    vkDestroyImageView(device.getDevice(), depthImageView, nullptr);
+    vkDestroyImage(device.getDevice(), depthImage, nullptr);
+    vkFreeMemory(device.getDevice(), depthImageMemory, nullptr);
+
     for (auto framebuffer : swapChainFramebuffers) 
     {
         vkDestroyFramebuffer(device.getDevice(), framebuffer, nullptr);
@@ -87,7 +92,8 @@ void VulkanSwapchain::createSwapChain()
     swapChainExtent = extent;
 }
 
-void VulkanSwapchain::createImageViews() {
+void VulkanSwapchain::createImageViews() 
+{
     swapChainImageViews.resize(swapChainImages.size());
 
     for (size_t i = 0; i < swapChainImages.size(); i++) 
@@ -124,15 +130,17 @@ void VulkanSwapchain::createFramebuffers(VkRenderPass renderPass)
 
     for (size_t i = 0; i < swapChainImageViews.size(); i++) 
     {
-        VkImageView attachments[] = {
-            swapChainImageViews[i]
+        std::array<VkImageView, 2> attachments = 
+        {
+            swapChainImageViews[i],
+            depthImageView // 【新增】把深度视图也嵌进相框
         };
 
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebufferInfo.renderPass = renderPass; // 外部注入工序单
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        framebufferInfo.pAttachments = attachments.data();
         framebufferInfo.width = swapChainExtent.width;
         framebufferInfo.height = swapChainExtent.height;
         framebufferInfo.layers = 1;
@@ -141,5 +149,63 @@ void VulkanSwapchain::createFramebuffers(VkRenderPass renderPass)
         {
             throw std::runtime_error("failed to create framebuffer!");
         }
+    }
+}
+
+void VulkanSwapchain::createDepthResources() 
+{
+    depthFormat = device.findDepthFormat();
+
+    // 1. 创建逻辑 Image
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = swapChainExtent.width;
+    imageInfo.extent.height = swapChainExtent.height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = depthFormat;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateImage(device.getDevice(), &imageInfo, nullptr, &depthImage) != VK_SUCCESS) 
+    {
+        throw std::runtime_error("failed to create depth image!");
+    }
+
+    // 2. 申请并绑定物理显存
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(device.getDevice(), depthImage, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = device.findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS) 
+    {
+        throw std::runtime_error("failed to allocate depth image memory!");
+    }
+    vkBindImageMemory(device.getDevice(), depthImage, depthImageMemory, 0);
+
+    // 3. 创建 Image View (给管线戴上护目镜)
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = depthImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = depthFormat;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device.getDevice(), &viewInfo, nullptr, &depthImageView) != VK_SUCCESS) 
+    {
+        throw std::runtime_error("failed to create depth image view!");
     }
 }

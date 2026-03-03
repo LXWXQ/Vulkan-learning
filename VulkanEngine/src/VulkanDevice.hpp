@@ -36,7 +36,8 @@ public:
     VkQueue getGraphicsQueue() { return graphicsQueue; }
     VkQueue getPresentQueue() { return presentQueue; }
     VkInstance getInstance() { return instance; }
-
+    VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
+    VkFormat findDepthFormat();
     QueueFamilyIndices findPhysicalQueueFamilies() { return findQueueFamilies(physicalDevice); }
     struct SwapChainSupportDetails 
     {
@@ -47,7 +48,6 @@ public:
 
     SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device);
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
-
 private:
     // --- 内部初始化流程 ---
     void createInstance();

@@ -16,7 +16,8 @@ find_package(Vulkan REQUIRED)
 # 2. 修正 GLFW 和 GLM 路径 (同样改用正斜杠 /)
 set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glfw")
 set(GLM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glm")
-
+set(TINYOBJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinyobjloader")
+set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/stb")
 # 3. 寻找依赖
 find_package(glfw3 REQUIRED)
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
@@ -31,6 +32,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${Vulkan_INCLUDE_DIRS}
     ${GLM_INCLUDE_DIR}
     "${GLFW_DIR}/include"
+    "${TINYOBJ_DIR}"
+    "${STB_DIR}"
 )
 
 # 7. 链接库
