@@ -21,8 +21,17 @@ layout(binding = 1) uniform sampler2D albedoMap;    // 基础颜色
 layout(binding = 2) uniform sampler2D normalMap;    // 凹凸细节
 layout(binding = 3) uniform sampler2D metallicMap;  // 金属度
 layout(binding = 4) uniform sampler2D roughnessMap; // 粗糙度
+layout(binding = 5) uniform sampler2D environmentMap;
 
 const float PI = 3.14159265359;
+const vec2 invAtan = vec2(0.1591, 0.3183); // 1/(2*PI) 和 1/PI 的预计算值，节省 GPU 算力
+vec2 SampleSphericalMap(vec3 v) 
+{
+    vec2 uv = vec2(atan(v.z, v.x), asin(v.y));
+    uv *= invAtan;
+    uv += 0.5;
+    return uv;
+}
 
 // ----------------------------------------------------------------------------
 // 物理学黑科技：利用屏幕像素偏导数，直接从法线贴图计算出真实的 3D 凹凸
@@ -111,8 +120,20 @@ void main() {
     float NdotL = max(dot(N, L), 0.0);        
     vec3 Lo = (kD * albedo / PI + specular) * radiance * NdotL;
 
-    // 5. 加入极度微弱的环境光，防止背光面死黑
-    vec3 ambient = ubo.ambientLightColor.xyz * ubo.ambientLightColor.w * albedo * 0.1;
+    // 5. 加入IBL 环境光全局照明
+    // 计算视线在茶壶表面的完美镜面反射向量 R
+    vec3 R = reflect(-V, N);
+    // 用法线 N 去全景图里采样漫反射环境光 (Irradiance)
+    vec3 envDiffuse = texture(environmentMap, SampleSphericalMap(N)).rgb;
+    // 用反射向量 R 去全景图里采样镜面反射高光 (Specular Reflection)
+    vec3 envSpecular = texture(environmentMap, SampleSphericalMap(R)).rgb;
+    //结合 PBR 材质属性进行混合
+    // 粗糙度越高，反射越模糊 (这里用简单的数值模拟，真正完美的做法是用 Mipmap LOD)
+    envSpecular *= (1.0 - roughness); 
+    
+    // 漫反射依然受到非金属度 (kD) 的控制
+    vec3 ambient = (kD * envDiffuse * albedo + envSpecular * F) * 0.5; // 0.5 是环境光强度微调系数
+    //vec3 ambient = ubo.ambientLightColor.xyz * ubo.ambientLightColor.w * albedo * 0.1;
 
     // 6. 最终合成
     vec3 color = ambient + Lo;

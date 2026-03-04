@@ -15,10 +15,10 @@ FirstApp::FirstApp()
     // 2. 建传送带
     VkExtent2D extent{WIDTH, HEIGHT};
     vulkanSwapchain = std::make_unique<VulkanSwapchain>(*vulkanDevice, extent);
-    
+    createGBufferResources();
     // 3. 制定工序单，并为传送带挂上工序单
     createRenderPass();
-    vulkanSwapchain->createFramebuffers(renderPass); 
+    createFramebuffers();
     
     // 4. 组建生产线 (Pipeline)，注意它依赖工序单和传送带的分辨率
     createDescriptorSetLayout();
@@ -26,17 +26,43 @@ FirstApp::FirstApp()
     createUniformBuffers();
     createDescriptorPool();
     createDescriptorSets();
-    createPipelineLayout();
-    createPipeline();
-    
+
+    geometrySystem = std::make_unique<GeometrySystem>(*vulkanDevice, renderPass, globalSetLayout);
+    lightingSystem = std::make_unique<LightingSystem>(*vulkanDevice, renderPass, globalSetLayout);
     // 5. 组建指挥部与红绿灯 (命令池和同步对象)
     
     createCommandBuffers();
     createSyncObjects();
+
+    imguiSystem = std::make_unique<ImGuiSystem>(window, *vulkanDevice, renderPass, vulkanSwapchain->imageCount(), commandPool);
+
+    // 设置相机的初始位置 (站在远处看茶壶)
+    cameraObject.transform.translation = {500.0f, 300.0f, 500.0f};
+    cameraObject.transform.rotation.y = glm::radians(225.f);
+    cameraObject.transform.rotation.x = glm::radians(-30.f);
 }
 
 FirstApp::~FirstApp() 
 {
+    for (auto framebuffer : framebuffers) 
+    {
+        vkDestroyFramebuffer(vulkanDevice->getDevice(), framebuffer, nullptr);
+    }
+
+    auto destroyAttachment = [&](FrameBufferAttachment& attachment) 
+    {
+        vkDestroyImageView(vulkanDevice->getDevice(), attachment.view, nullptr);
+        vkDestroyImage(vulkanDevice->getDevice(), attachment.image, nullptr);
+        vkFreeMemory(vulkanDevice->getDevice(), attachment.memory, nullptr);
+    };
+
+    destroyAttachment(gBuffer.position);
+    destroyAttachment(gBuffer.normal);
+    destroyAttachment(gBuffer.albedo);
+    destroyAttachment(gBuffer.pbr);
+    destroyAttachment(gBuffer.depth);
+    vkDestroySampler(vulkanDevice->getDevice(), gBuffer.sampler, nullptr);
+
     auto destroyTexture = [&](TextureData& tex) 
     {
         vkDestroySampler(vulkanDevice->getDevice(), tex.sampler, nullptr);
@@ -62,116 +88,175 @@ FirstApp::~FirstApp()
     vkDestroyFence(vulkanDevice->getDevice(), inFlightFence, nullptr);
     
     vkDestroyCommandPool(vulkanDevice->getDevice(), commandPool, nullptr);
-    vkDestroyPipelineLayout(vulkanDevice->getDevice(), pipelineLayout, nullptr);
     vkDestroyRenderPass(vulkanDevice->getDevice(), renderPass, nullptr);
     
     glfwDestroyWindow(window);
     glfwTerminate();
 }
 
+void FirstApp::initWindow() {
+
+    glfwInit();
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Engine - Sentinel", nullptr, nullptr);
+
+}
+
 void FirstApp::run() 
 {
+    VulkanCamera camera{};
+    CameraController cameraController{}; // 实例化控制器
+
+    auto currentTime = std::chrono::high_resolution_clock::now();
+
     while (!glfwWindowShouldClose(window)) 
     {
         glfwPollEvents();
-        drawFrame();
+        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0) {
+            ImGui_ImplGlfw_Sleep(10);
+            continue;
+        }
+
+        auto newTime = std::chrono::high_resolution_clock::now();
+        float frameTime = std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
+        currentTime = newTime;
+
+        // ==========================================
+        // 跨平台输入分发系统
+        // ==========================================
+#ifdef __ANDROID__
+        // 如果宏定义为安卓平台，走虚拟触控接口
+        cameraController.processAndroidTouchInput(frameTime, cameraObject);
+#else
+        // PC 端：走传统的 GLFW 键鼠硬核控制
+        cameraController.processPCInput(window, frameTime, cameraObject);
+#endif
+
+        // 更新光学镜头矩阵
+        camera.setViewYXZ(cameraObject.transform.translation, cameraObject.transform.rotation);
+        float aspect = vulkanSwapchain->getSwapChainExtent().width / (float)vulkanSwapchain->getSwapChainExtent().height;
+        camera.setPerspectiveProjection(glm::radians(60.f), aspect, 0.1f, 5000.f);
+
+        drawFrame(camera, frameTime);
     }
     vkDeviceWaitIdle(vulkanDevice->getDevice());
 }
 
-void FirstApp::initWindow() {
-    glfwInit();
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Engine - Sentinel", nullptr, nullptr);
-}
-
 void FirstApp::createRenderPass() 
 {
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = vulkanSwapchain->getSwapChainImageFormat();
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // --- 1. 定义 6 个 Attachments (附件) ---
+    std::array<VkAttachmentDescription, 6> attachments{};
 
-    VkAttachmentReference colorAttachmentRef{};
-    colorAttachmentRef.attachment = 0;
-    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // 0: Swapchain (最终输出到屏幕)
+    attachments[0].format = vulkanSwapchain->getSwapChainImageFormat();
+    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // 必须存下来给屏幕显示
+    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = vulkanDevice->findDepthFormat();
-    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // 1-4: G-Buffer 颜色附件 (Position, Normal, Albedo, PBR)
+    // 【核心性能奥义】：storeOp 设为 DONT_CARE！因为在 Subpass 1 算完光照后，这些几何数据就可以丢弃了，绝不要写回主显存！
+    for (int i = 1; i <= 4; i++) {
+        attachments[i].format = (i == 1 || i == 2) ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
+        attachments[i].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; 
+        attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // 结束时作为输入附件供下一个 Subpass 读取
+        attachments[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; 
+    }
 
-    VkAttachmentReference depthAttachmentRef{};
-    depthAttachmentRef.attachment = 1; 
-    depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // 5: G-Buffer 深度附件
+    attachments[5].format = vulkanDevice->findDepthFormat();
+    attachments[5].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[5].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[5].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; // 深度也无需写回
+    attachments[5].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[5].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[5].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[5].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorAttachmentRef;
-    subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-    std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+    // --- 2. 划定 Subpass 0: Geometry Pass (几何装填) ---
+    std::array<VkAttachmentReference, 4> colorReferences = {
+        VkAttachmentReference{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        VkAttachmentReference{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        VkAttachmentReference{3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        VkAttachmentReference{4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}
+    };
+    VkAttachmentReference depthReference = {5, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription geometrySubpass{};
+    geometrySubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    geometrySubpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
+    geometrySubpass.pColorAttachments = colorReferences.data();
+    geometrySubpass.pDepthStencilAttachment = &depthReference;
+
+
+    // --- 3. 划定 Subpass 1: Lighting Pass (光照合成) ---
+    VkAttachmentReference swapchainReference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    
+    // 把刚才 Subpass 0 写好的 5 张图，作为输入附件 (Input Attachment) 喂给 Subpass 1
+    std::array<VkAttachmentReference, 5> inputReferences = {
+        VkAttachmentReference{1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkAttachmentReference{2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkAttachmentReference{3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkAttachmentReference{4, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkAttachmentReference{5, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+    };
+
+    VkSubpassDescription lightingSubpass{};
+    lightingSubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    lightingSubpass.colorAttachmentCount = 1;
+    lightingSubpass.pColorAttachments = &swapchainReference; // 输出到 Swapchain
+    lightingSubpass.inputAttachmentCount = static_cast<uint32_t>(inputReferences.size());
+    lightingSubpass.pInputAttachments = inputReferences.data(); // 读取 G-Buffer
+
+
+    // --- 4. 建立同步屏障 (Subpass Dependencies) ---
+    std::array<VkSubpassDependency, 2> dependencies{};
+
+    // 依赖 1：让 Subpass 0 等待图像就绪
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].srcAccessMask = 0;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    // 依赖 2：让 Subpass 1 等待 Subpass 0 把颜色和深度写完，然后再以 Input Attachment 方式读取 (像素级按区域同步)
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = 1;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    // --- 5. 组装最终 RenderPass ---
+    std::array<VkSubpassDescription, 2> subpasses = {geometrySubpass, lightingSubpass};
 
     VkRenderPassCreateInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
     renderPassInfo.pAttachments = attachments.data();
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.subpassCount = static_cast<uint32_t>(subpasses.size());
+    renderPassInfo.pSubpasses = subpasses.data();
+    renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+    renderPassInfo.pDependencies = dependencies.data();
 
-    if (vkCreateRenderPass(vulkanDevice->getDevice(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("failed to create render pass!");
+    if (vkCreateRenderPass(vulkanDevice->getDevice(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+        throw std::runtime_error("[致命错误] 延迟渲染双子通道 RenderPass 创建失败！");
     }
-}
-
-void FirstApp::createPipelineLayout() 
-{
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; // 顶点和片段着色器都能�?
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(SimplePushConstantData);
-
-    std::vector<VkDescriptorSetLayout> descriptorSetLayouts{globalSetLayout};
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
-    pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-
-    if (vkCreatePipelineLayout(vulkanDevice->getDevice(), &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("failed to create pipeline layout!");
-    }
-}
-
-void FirstApp::createPipeline() {
-    PipelineConfigInfo pipelineConfig{};
-    VulkanPipeline::defaultPipelineConfigInfo(pipelineConfig, vulkanSwapchain->getSwapChainExtent().width, vulkanSwapchain->getSwapChainExtent().height);
-    
-    pipelineConfig.renderPass = renderPass;
-    pipelineConfig.pipelineLayout = pipelineLayout;
-
-    // 哨兵提醒：注意这里的�?径！�?�? shaders 文件夹在执�?�目录的上一�?
-    vulkanPipeline = std::make_unique<VulkanPipeline>(
-        *vulkanDevice,
-        "../shaders/shader.vert.spv",
-        "../shaders/shader.frag.spv",
-        pipelineConfig
-    );
 }
 
 void FirstApp::createCommandPool() 
@@ -202,7 +287,8 @@ void FirstApp::createCommandBuffers()
     }
 }
 
-void FirstApp::recordCommandBuffer(uint32_t imageIndex) 
+// ✅ 【修改】：更新签名
+void FirstApp::recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, float dt) 
 {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -211,71 +297,61 @@ void FirstApp::recordCommandBuffer(uint32_t imageIndex)
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = renderPass;
-    // 动态获取当前应该画�?张画�?
-    renderPassInfo.framebuffer = vulkanSwapchain->getFramebuffer(imageIndex);
     renderPassInfo.renderArea.offset = {0, 0};
     renderPassInfo.renderArea.extent = vulkanSwapchain->getSwapChainExtent();
+    renderPassInfo.framebuffer = framebuffers[imageIndex];
 
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
+    std::array<VkClearValue, 6> clearValues{};
+    clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; 
+    clearValues[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[3].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[4].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[5].depthStencil = {1.0f, 0}; 
 
     renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
     renderPassInfo.pClearValues = clearValues.data();
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vulkanPipeline->bind(commandBuffer);
-    vulkanModel->bind(commandBuffer);
 
-    static auto startTime = std::chrono::high_resolution_clock::now();
-    auto currentTime = std::chrono::high_resolution_clock::now();
-    float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
-
-    glm::mat4 model = glm::mat4(1.0f);
-    
-    model = glm::rotate(model, time * glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-    
-    model = glm::scale(model, glm::vec3(0.1f, 0.1f, 0.1f));
-    
-    model = glm::translate(model, glm::vec3(0.0f, 0.0F, 0.0f)); 
-
-    glm::mat4 view = glm::lookAt(glm::vec3(500.0f, 500.0f, 500.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), (float)WIDTH / (float)HEIGHT, 0.1f, 1000.0f);
-    proj[1][1] *= -1; 
-
-    
+    // ==========================================
+    // ✅ 【大清洗】：彻底抛弃旧的硬编码矩阵，接入光学系统！
+    // ==========================================
     GlobalUbo ubo{};
-    ubo.projectionView = proj * view;
-    ubo.cameraPos = glm::vec4(500.0f, 500.0f, 500.0f, 1.0f);
-    // 光照方向和颜色我们在结构体里已经给了极佳的默认值，直接使用即可
+    ubo.projectionView = camera.getProjection() * camera.getView();
+    ubo.cameraPos = glm::vec4(cameraObject.transform.translation, 1.0f); // 同步真实眼睛坐标
     memcpy(uboMapped, &ubo, sizeof(ubo));
-    vkCmdBindDescriptorSets(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipelineLayout,
-        0, // 第一个 set (对应 layout(set = 0))
-        1,
-        &globalDescriptorSet,
-        0,
-        nullptr);
 
-    SimplePushConstantData push{};
-    push.modelMatrix = model;
-    push.normalMatrix = model;
-    vkCmdPushConstants(
-        commandBuffer,
-        pipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0,
-        sizeof(SimplePushConstantData),
-        &push);
-        
+    // 动态获取时间 (为了给可能存在的物体做动画)
+    static auto startTime = std::chrono::high_resolution_clock::now();
+    float time = std::chrono::duration<float, std::chrono::seconds::period>(std::chrono::high_resolution_clock::now() - startTime).count();
 
-    vulkanModel->draw(commandBuffer);
-    //vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    if (!gameObjects.empty()) 
+    {
+        gameObjects[0].transform.rotation.y = time * glm::radians(45.0f); // 依然可以让茶壶自转
+    }
+
+    FrameInfo frameInfo{
+        imageIndex,
+        dt,            // 使用传入的 delta time
+        commandBuffer,
+        globalDescriptorSet,
+        gameObjects
+    };
+
+    // --- Subpass 0: Geometry Pass ---
+    geometrySystem->render(frameInfo);
+
+    // --- 切换到 Subpass 1 ---
+    vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+
+    // --- Subpass 1: Lighting Pass ---
+    lightingSystem->render(frameInfo); 
+
+    // 在全屏光照画完之后，把 ImGui 监控面板盖在屏幕最上层！
+    imguiSystem->render(commandBuffer, cameraObject, dt);
+
     vkCmdEndRenderPass(commandBuffer);
-
     vkEndCommandBuffer(commandBuffer);
 }
 
@@ -296,7 +372,7 @@ void FirstApp::createSyncObjects()
     }
 }
 
-void FirstApp::drawFrame()
+void FirstApp::drawFrame(VulkanCamera& camera, float dt)
 {
     vkWaitForFences(vulkanDevice->getDevice(), 1, &inFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(vulkanDevice->getDevice(), 1, &inFlightFence);
@@ -305,7 +381,7 @@ void FirstApp::drawFrame()
     vkAcquireNextImageKHR(vulkanDevice->getDevice(), vulkanSwapchain->getSwapchain(), UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 
     vkResetCommandBuffer(commandBuffer, 0);
-    recordCommandBuffer(imageIndex);
+    recordCommandBuffer(imageIndex, camera, dt);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -362,6 +438,17 @@ void FirstApp::createDescriptorSetLayout()
         bindings.push_back(samplerBinding);
     }
 
+    for (uint32_t i = 6; i <= 9; i++) 
+    {
+        VkDescriptorSetLayoutBinding inputBinding{};
+        inputBinding.binding = i;
+        inputBinding.descriptorCount = 1;
+        inputBinding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; // 关键类型！
+        inputBinding.pImmutableSamplers = nullptr;
+        inputBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(inputBinding);
+    }
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -413,7 +500,7 @@ void FirstApp::createUniformBuffers()
 
 void FirstApp::createDescriptorPool() 
 {
-    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    std::array<VkDescriptorPoolSize, 3> poolSizes{};
     // UBO 依然只需要 1 个
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = 1;
@@ -421,6 +508,9 @@ void FirstApp::createDescriptorPool()
     // 【核心扩容】：告诉内存池，我们要放 4 个图像采样器进去！
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = 5; // 4 张 PBR 贴图 + 1 张环境贴图
+
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    poolSizes[2].descriptorCount = 4;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -456,8 +546,13 @@ void FirstApp::createDescriptorSets() {
     VkDescriptorImageInfo metallicInfo{metallicTex.sampler, metallicTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo roughnessInfo{roughnessTex.sampler, roughnessTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo environmentInfo{environmentTex.sampler, environmentTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+    VkDescriptorImageInfo posInputInfo{VK_NULL_HANDLE, gBuffer.position.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo normalInputInfo{VK_NULL_HANDLE, gBuffer.normal.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo albedoInputInfo{VK_NULL_HANDLE, gBuffer.albedo.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo pbrInputInfo{VK_NULL_HANDLE, gBuffer.pbr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     // --- 组装 5 条写入指令 ---
-    std::array<VkWriteDescriptorSet, 6> descriptorWrites{};
+    std::array<VkWriteDescriptorSet, 10> descriptorWrites{};
     
     // 0 号：UBO
     descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -487,6 +582,24 @@ void FirstApp::createDescriptorSets() {
     descriptorWrites[3] = writeImage(3, &metallicInfo);
     descriptorWrites[4] = writeImage(4, &roughnessInfo);
     descriptorWrites[5] = writeImage(5, &environmentInfo);
+
+    auto writeInput = [&](uint32_t binding, VkDescriptorImageInfo* imgInfo) {
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = globalDescriptorSet;
+        write.dstBinding = binding;
+        write.dstArrayElement = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; // 关键！
+        write.descriptorCount = 1;
+        write.pImageInfo = imgInfo;
+        return write;
+    };
+
+    descriptorWrites[6] = writeInput(6, &posInputInfo);
+    descriptorWrites[7] = writeInput(7, &normalInputInfo);
+    descriptorWrites[8] = writeInput(8, &albedoInputInfo);
+    descriptorWrites[9] = writeInput(9, &pbrInputInfo);
+
     vkUpdateDescriptorSets(vulkanDevice->getDevice(), static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 }
 
@@ -820,29 +933,154 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
 
 void FirstApp::loadGameObjects() 
 {
-    // 6 �?顶点（上下两极，�?间四�?角）
-    /*std::vector<Vertex> vertices{
-        {{ 0.0f, -0.5f,  0.0f}, {1.0f, 0.0f, 0.0f}}, // 0: 顶部 (�?)
-        {{ 0.0f,  0.5f,  0.0f}, {0.0f, 0.0f, 1.0f}}, // 1: 底部 (�?)
-        {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}}, // 2: 前左 (�?)
-        {{ 0.5f,  0.0f,  0.5f}, {1.0f, 1.0f, 0.0f}}, // 3: 前右 (�?)
-        {{ 0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}}, // 4: 后右 (�?)
-        {{-0.5f,  0.0f, -0.5f}, {0.0f, 1.0f, 1.0f}}  // 5: 后左 (�?)
-    };
+    // 1. 创建茶壶实体 (Entity)
+    // 注意：createModelFromFile 原本返回 unique_ptr，它会自动转换为 shared_ptr，被所有引用它的物体共享
+    std::shared_ptr<VulkanModel> teapotModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/teapot.obj");
+    
+    VulkanGameObject teapot = VulkanGameObject::createGameObject();
+    teapot.model = teapotModel; // 挂载模型组件
+    teapot.transform.translation = {0.0f, 0.0f, 0.0f}; // 挂载位置组件
+    teapot.transform.scale = {0.2f, 0.2f, 0.2f};       // 挂载缩放组件
+    
+    gameObjects.push_back(std::move(teapot)); // 扔进世界
 
-    // 8 �?�?，共 24 �?索引序号
-    std::vector<uint32_t> indices{
-        0, 2, 3, // 上半�? 4 �?�?
-        0, 3, 4,
-        0, 4, 5,
-        0, 5, 2,
-        1, 3, 2, // 下半�? 4 �?�?
-        1, 4, 3,
-        1, 5, 4,
-        1, 2, 5
-    };
+    // 2. 创建天空盒实体
+    std::shared_ptr<VulkanModel> sphereModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/sphere.obj");
+    
+    VulkanGameObject skybox = VulkanGameObject::createGameObject();
+    skybox.model = sphereModel;
+    skybox.isSkybox = true; // 挂载天空盒特征标签
+    
+    gameObjects.push_back(std::move(skybox)); // 扔进世界
 
-    // 将顶点和索引一起发给显�?
-    vulkanModel = std::make_unique<VulkanModel>(*vulkanDevice, vertices, indices);*/
-    vulkanModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/teapot.obj");
+    // 【可选测试】：你可以试着解除下面这两行的注释，直接在场景里多刷出一个偏右一点的小茶壶！它的模型内存是完全复用的！
+    
+    /*VulkanGameObject teapot2 = VulkanGameObject::createGameObject();
+    teapot2.model = teapotModel; // 复用刚才的指针！
+    teapot2.transform.translation = {500.0f, 0.0f, 0.0f}; 
+    teapot2.transform.scale = {0.2f, 0.2f, 0.2f};
+    gameObjects.push_back(std::move(teapot2));
+    */
+}
+void FirstApp::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment) 
+{
+    attachment->format = format;
+
+    // 1. 创建逻辑图像
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent.width = gBuffer.width;
+    imageInfo.extent.height = gBuffer.height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    // 核心：必须既能作为渲染目标(写入)，又能作为采样目标(读取)
+    imageInfo.usage = imageInfo.usage = usage | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(vulkanDevice->getDevice(), &imageInfo, nullptr, &attachment->image) != VK_SUCCESS) {
+        throw std::runtime_error("[致命错误] G-Buffer 附件 VkImage 创建失败！");
+    }
+
+    // 2. 申请并绑定物理显存 (必须是 DEVICE_LOCAL，追求极致读写速度)
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(vulkanDevice->getDevice(), attachment->image, &memReqs);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = vulkanDevice->findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &attachment->memory) != VK_SUCCESS) {
+        throw std::runtime_error("[致命错误] G-Buffer 附件显存分配失败！");
+    }
+    vkBindImageMemory(vulkanDevice->getDevice(), attachment->image, attachment->memory, 0);
+
+    // 3. 创建观察镜 (ImageView)
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    // 智能判断是深度掩码还是颜色掩码
+    viewInfo.subresourceRange.aspectMask = (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    viewInfo.image = attachment->image;
+
+    if (vkCreateImageView(vulkanDevice->getDevice(), &viewInfo, nullptr, &attachment->view) != VK_SUCCESS) {
+        throw std::runtime_error("[致命错误] G-Buffer ImageView 创建失败！");
+    }
+}
+
+void FirstApp::createGBufferResources() 
+{
+    gBuffer.width = vulkanSwapchain->getSwapChainExtent().width;
+    gBuffer.height = vulkanSwapchain->getSwapChainExtent().height;
+
+    std::cout << "[Sentinel 通报] 开始在显存中开辟 G-Buffer 防区...\n";
+
+    // 1. 坐标附件 (16位浮点)
+    createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.position);
+    // 2. 法线附件 (16位浮点)
+    createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.normal);
+    // 3. 颜色附件 (8位 UNORM)
+    createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.albedo);
+    // 4. PBR 参数附件 (8位 UNORM)
+    createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.pbr);
+    // 5. 深度附件 (32位浮点)
+    createAttachment(vulkanDevice->findDepthFormat(), VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &gBuffer.depth);
+
+    // 6. 创建全局采样器
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    // 【架构师秘诀】：G-Buffer 必须使用 NEAREST (邻近) 采样！如果用 LINEAR，会导致前景和背景的法线/深度发生错误混合，产生光照光晕。
+    samplerInfo.magFilter = VK_FILTER_NEAREST; 
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    
+    if (vkCreateSampler(vulkanDevice->getDevice(), &samplerInfo, nullptr, &gBuffer.sampler) != VK_SUCCESS) {
+        throw std::runtime_error("[致命错误] G-Buffer 采样器创建失败！");
+    }
+
+    std::cout << "[Sentinel 通报] G-Buffer 锻造完成！5 张底片已就绪。\n";
+}
+
+void FirstApp::createFramebuffers() 
+{
+    framebuffers.resize(vulkanSwapchain->imageCount());
+    for (size_t i = 0; i < vulkanSwapchain->imageCount(); i++) 
+    {
+        // 严格按照 RenderPass 里的 0-5 顺序装填 View
+        std::array<VkImageView, 6> attachments = {
+            vulkanSwapchain->getImageView(i), // 0: Swapchain
+            gBuffer.position.view,            // 1: Position
+            gBuffer.normal.view,              // 2: Normal
+            gBuffer.albedo.view,              // 3: Albedo
+            gBuffer.pbr.view,                 // 4: PBR
+            gBuffer.depth.view                // 5: Depth
+        };
+
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = renderPass;
+        framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+        framebufferInfo.pAttachments = attachments.data();
+        framebufferInfo.width = vulkanSwapchain->getSwapChainExtent().width;
+        framebufferInfo.height = vulkanSwapchain->getSwapChainExtent().height;
+        framebufferInfo.layers = 1;
+
+        if (vkCreateFramebuffer(vulkanDevice->getDevice(), &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+            throw std::runtime_error("[致命错误] G-Buffer 帧缓冲创建失败！");
+        }
+    }
 }

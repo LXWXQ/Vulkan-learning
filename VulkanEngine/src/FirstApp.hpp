@@ -4,6 +4,12 @@
 #include "VulkanSwapchain.hpp"
 #include "VulkanPipeline.hpp"
 #include "VulkanModel.hpp"
+#include "GeometrySystem.hpp"
+#include "LightingSystem.hpp"
+#include "VulkanCamera.hpp"
+#include "CameraController.hpp"
+#include "ImGuiSystem.hpp"
+
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -14,18 +20,23 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-struct GlobalUbo {
-    glm::mat4 projectionView{1.f}; 
-    glm::vec4 ambientLightColor{1.f, 1.f, 1.f, .1f}; 
-    glm::vec3 lightDirection = glm::normalize(glm::vec3(1.f, -3.f, -1.f)); 
-    alignas(16) glm::vec4 lightColor{1.f}; 
-    alignas(16) glm::vec4 cameraPos; // 【新增】摄像机的绝对位置 (必须 16 字节对齐)
+struct FrameBufferAttachment 
+{
+    VkImage image;
+    VkDeviceMemory memory;
+    VkImageView view;
+    VkFormat format;
 };
 
-// 我们的遥控器数据包 (最大通常只有 128 字节，极其珍贵)
-struct SimplePushConstantData {
-    glm::mat4 modelMatrix{1.f}; 
-    glm::mat4 normalMatrix{1.f}; // 专门给法线用的变换矩阵，防止缩放导致光照错误
+struct GBuffer 
+{
+    int32_t width, height;
+    FrameBufferAttachment position;
+    FrameBufferAttachment normal;
+    FrameBufferAttachment albedo;
+    FrameBufferAttachment pbr; // R: Metallic, G: Roughness, B: AO, A: 未使用
+    FrameBufferAttachment depth;
+    VkSampler sampler; // 光照阶段采样 G-Buffer 用
 };
 
 class FirstApp {
@@ -44,23 +55,20 @@ public:
 private:
     void initWindow();
     void createRenderPass();
-    void createPipelineLayout();
-    void createPipeline();
     void createCommandPool();
     void createCommandBuffers();
-    void recordCommandBuffer(uint32_t imageIndex);
+    void recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, float dt);
     void createSyncObjects();
-    void drawFrame();
+    void drawFrame(VulkanCamera& camera, float dt);
 
     // --- 核心模块引用 (智能指针管理生命周期) ---
     GLFWwindow* window;
     std::unique_ptr<VulkanDevice> vulkanDevice;
     std::unique_ptr<VulkanSwapchain> vulkanSwapchain;
-    std::unique_ptr<VulkanPipeline> vulkanPipeline;
+    //std::unique_ptr<VulkanPipeline> vulkanPipeline;
 
     // --- App 层独有的调度资源 ---
     VkRenderPass renderPass;
-    VkPipelineLayout pipelineLayout;
     VkCommandPool commandPool;
     VkCommandBuffer commandBuffer;
 
@@ -68,7 +76,6 @@ private:
     VkSemaphore renderFinishedSemaphore;
     VkFence inFlightFence;
 
-    std::unique_ptr<VulkanModel> vulkanModel;
     void loadGameObjects(); // 添加一个加载模型的函数
 
     VkDescriptorSetLayout globalSetLayout;
@@ -102,4 +109,16 @@ private:
     void createSingleTexture(const std::string& filepath, TextureData& outTexture, VkFormat format);
     TextureData environmentTex;
     void createHDRTexture(const std::string& filepath, TextureData& outTexture);
+
+    GBuffer gBuffer;
+    void createGBufferResources();
+    void createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment);
+    std::vector<VkFramebuffer> framebuffers;
+    void createFramebuffers();
+    std::unique_ptr<GeometrySystem> geometrySystem;
+    std::unique_ptr<LightingSystem> lightingSystem;
+    std::vector<VulkanGameObject> gameObjects;
+
+    std::unique_ptr<ImGuiSystem> imguiSystem;
+    VulkanGameObject cameraObject = VulkanGameObject::createGameObject();
 };

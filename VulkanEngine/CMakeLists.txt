@@ -18,12 +18,22 @@ set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glfw")
 set(GLM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glm")
 set(TINYOBJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinyobjloader")
 set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/stb")
+set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/imgui")
 # 3. 寻找依赖
 find_package(glfw3 REQUIRED)
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
 # 4. 扫描源文件
-file(GLOB_RECURSE SOURCES "src/*.cpp" "main.cpp")
-
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+list(APPEND SOURCES "main.cpp")
+list(APPEND SOURCES 
+    "${IMGUI_DIR}/imgui.cpp"
+    "${IMGUI_DIR}/imgui_demo.cpp"
+    "${IMGUI_DIR}/imgui_draw.cpp"
+    "${IMGUI_DIR}/imgui_tables.cpp"
+    "${IMGUI_DIR}/imgui_widgets.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_glfw.cpp"
+    "${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp"
+)
 # 5. 生成可执行文件
 add_executable(${PROJECT_NAME} ${SOURCES})
 
@@ -34,6 +44,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${GLFW_DIR}/include"
     "${TINYOBJ_DIR}"
     "${STB_DIR}"
+    "${IMGUI_DIR}"
+    "${IMGUI_DIR}/backends"
 )
 
 # 7. 链接库
@@ -52,7 +64,7 @@ file(MAKE_DIRECTORY ${OUTPUT_SHADER_DIR})
 
 # 扫描所有的 .vert 和 .frag 文件
 file(GLOB SHADER_FILES "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag")
-
+file(GLOB SHADER_FILES CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag")
 foreach(SHADER_FILE ${SHADER_FILES})
     # 获取文件名 (例如 shader.vert)
     get_filename_component(FILE_NAME ${SHADER_FILE} NAME)

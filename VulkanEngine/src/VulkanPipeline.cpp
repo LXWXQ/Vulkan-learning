@@ -63,10 +63,10 @@ void VulkanPipeline::createGraphicsPipeline(const std::string& vertFilepath, con
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 1;
-    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+    vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(configInfo.bindingDescriptions.size());
+    vertexInputInfo.pVertexBindingDescriptions = configInfo.bindingDescriptions.data();
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(configInfo.attributeDescriptions.size());
+    vertexInputInfo.pVertexAttributeDescriptions = configInfo.attributeDescriptions.data();
 
     VkPipelineViewportStateCreateInfo viewportInfo{};
     viewportInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -148,13 +148,16 @@ void VulkanPipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, u
     configInfo.multisampleInfo.sampleShadingEnable = VK_FALSE;
     configInfo.multisampleInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    configInfo.colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    configInfo.colorBlendAttachment.blendEnable = VK_FALSE;
-
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    configInfo.colorBlendAttachments = {colorBlendAttachment};
+    configInfo.bindingDescriptions = {Vertex::getBindingDescription()};
+    configInfo.attributeDescriptions = Vertex::getAttributeDescriptions();
     configInfo.colorBlendInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     configInfo.colorBlendInfo.logicOpEnable = VK_FALSE;
-    configInfo.colorBlendInfo.attachmentCount = 1;
-    configInfo.colorBlendInfo.pAttachments = &configInfo.colorBlendAttachment;
+    configInfo.colorBlendInfo.attachmentCount = static_cast<uint32_t>(configInfo.colorBlendAttachments.size());
+    configInfo.colorBlendInfo.pAttachments = configInfo.colorBlendAttachments.data();
 
     configInfo.depthStencilInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     configInfo.depthStencilInfo.depthTestEnable = VK_TRUE;

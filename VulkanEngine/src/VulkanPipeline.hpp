@@ -12,12 +12,15 @@ struct PipelineConfigInfo
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo;
     VkPipelineRasterizationStateCreateInfo rasterizationInfo;
     VkPipelineMultisampleStateCreateInfo multisampleInfo;
-    VkPipelineColorBlendAttachmentState colorBlendAttachment;
+    std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments;
     VkPipelineColorBlendStateCreateInfo colorBlendInfo;
     VkPipelineDepthStencilStateCreateInfo depthStencilInfo;
     VkPipelineLayout pipelineLayout = nullptr;
     VkRenderPass renderPass = nullptr;
     uint32_t subpass = 0;
+
+    std::vector<VkVertexInputBindingDescription> bindingDescriptions{};
+    std::vector<VkVertexInputAttributeDescription> attributeDescriptions{};
 };
 
 class VulkanPipeline 
