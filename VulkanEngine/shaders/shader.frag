@@ -33,17 +33,33 @@ vec2 SampleSphericalMap(vec3 v)
     return uv;
 }
 
-// ----------------------------------------------------------------------------
-// 物理学黑科技：利用屏幕像素偏导数，直接从法线贴图计算出真实的 3D 凹凸
 vec3 getNormalFromMap() {
     vec3 tangentNormal = texture(normalMap, fragUV).xyz * 2.0 - 1.0;
+    
     vec3 Q1  = dFdx(fragPosWorld);
     vec3 Q2  = dFdy(fragPosWorld);
     vec2 st1 = dFdx(fragUV);
     vec2 st2 = dFdy(fragUV);
+    
     vec3 N   = normalize(fragNormalWorld);
-    vec3 T  = normalize(Q1*st2.t - Q2*st1.t);
-    vec3 B  = -normalize(cross(N, T));
+    
+    if (abs(st1.s) > 0.5 || abs(st1.t) > 0.5 || abs(st2.s) > 0.5 || abs(st2.t) > 0.5) 
+    {
+        return N; // 遇到接缝，直接返回顶点自带的光滑法线，保平安！
+    }
+
+    // 防御极点退化
+    float det = st1.s * st2.t - st2.s * st1.t;
+    if (abs(det) < 0.00001) {
+        return N;
+    }
+    
+    float invDet = 1.0 / det;
+    vec3 T = (Q1 * st2.t - Q2 * st1.t) * invDet;
+    
+    T = normalize(T - dot(T, N) * N);
+    vec3 B = -normalize(cross(N, T)); // 保持你原本的负号
+    
     mat3 TBN = mat3(T, B, N);
     return normalize(TBN * tangentNormal);
 }

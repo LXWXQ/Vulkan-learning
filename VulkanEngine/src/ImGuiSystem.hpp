@@ -10,7 +10,7 @@ public:
     // 初始化需要窗口、设备、渲染通道和命令池（用于上传字体）
     ImGuiSystem(GLFWwindow* window, VulkanDevice& device, VkRenderPass renderPass, uint32_t imageCount, VkCommandPool commandPool);
     ~ImGuiSystem();
-
+    void newFrame() ;
     // 禁止拷贝
     ImGuiSystem(const ImGuiSystem&) = delete;
     ImGuiSystem& operator=(const ImGuiSystem&) = delete;

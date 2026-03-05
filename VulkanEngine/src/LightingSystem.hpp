@@ -13,7 +13,8 @@ public:
     LightingSystem& operator=(const LightingSystem&) = delete;
 
     void render(FrameInfo& frameInfo);
-
+    void createDebugLightPipeline(VkRenderPass renderPass);
+    void renderDebugLights(FrameInfo& frameInfo, std::shared_ptr<VulkanModel> sphereModel);
 private:
     void createPipelineLayout(VkDescriptorSetLayout globalSetLayout);
     void createPipeline(VkRenderPass renderPass);
@@ -21,4 +22,5 @@ private:
     VulkanDevice& vulkanDevice;
     VkPipelineLayout pipelineLayout;
     std::unique_ptr<VulkanPipeline> lightingPipeline;
+    std::unique_ptr<VulkanPipeline> debugLightPipeline;
 };

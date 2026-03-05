@@ -41,8 +41,8 @@ struct GBuffer
 
 class FirstApp {
 public:
-    static constexpr int WIDTH = 800;
-    static constexpr int HEIGHT = 600;
+    static constexpr int WIDTH = 1920;
+    static constexpr int HEIGHT = 1080;
 
     FirstApp();
     ~FirstApp();
@@ -121,4 +121,5 @@ private:
 
     std::unique_ptr<ImGuiSystem> imguiSystem;
     VulkanGameObject cameraObject = VulkanGameObject::createGameObject();
+    std::shared_ptr<VulkanModel> quadSphereModel = nullptr;
 };

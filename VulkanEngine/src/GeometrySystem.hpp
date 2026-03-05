@@ -4,7 +4,8 @@
 #include "FrameInfo.hpp"
 #include <memory>
 
-class GeometrySystem {
+class GeometrySystem 
+{
 public:
     // 构造时，自己负责创建自己的 PipelineLayout 和 Pipeline
     GeometrySystem(VulkanDevice& device, VkRenderPass renderPass, VkDescriptorSetLayout globalSetLayout);
@@ -24,4 +25,5 @@ private:
     VkPipelineLayout pipelineLayout;
     std::unique_ptr<VulkanPipeline> geometryPipeline;
     std::unique_ptr<VulkanPipeline> skyboxPipeline;
+    std::unique_ptr<VulkanPipeline> gridPipeline;
 };

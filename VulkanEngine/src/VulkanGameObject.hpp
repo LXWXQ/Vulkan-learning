@@ -48,6 +48,7 @@ public:
     std::shared_ptr<VulkanModel> model{}; 
     TransformComponent transform{};
     bool isSkybox = false; // 简易的 Tag Component (标签组件)
+    bool isGrid = false;
 
 private:
     VulkanGameObject(id_t objId) : id{objId} {}

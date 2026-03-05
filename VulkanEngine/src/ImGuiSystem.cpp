@@ -48,11 +48,15 @@ ImGuiSystem::~ImGuiSystem() {
      vkDestroyDescriptorPool(vulkanDevice.getDevice(), imguiPool, nullptr);
 }
 
-void ImGuiSystem::render(VkCommandBuffer commandBuffer, VulkanGameObject& cameraObj, float dt) {
+void ImGuiSystem::newFrame() 
+{
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+}
 
+void ImGuiSystem::render(VkCommandBuffer commandBuffer, VulkanGameObject& cameraObj, float dt) 
+{
     // ========================================================
     // 工业级引擎调试面板
     // ========================================================

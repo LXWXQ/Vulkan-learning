@@ -37,9 +37,9 @@ FirstApp::FirstApp()
     imguiSystem = std::make_unique<ImGuiSystem>(window, *vulkanDevice, renderPass, vulkanSwapchain->imageCount(), commandPool);
 
     // 设置相机的初始位置 (站在远处看茶壶)
-    cameraObject.transform.translation = {500.0f, 300.0f, 500.0f};
-    cameraObject.transform.rotation.y = glm::radians(225.f);
-    cameraObject.transform.rotation.x = glm::radians(-30.f);
+    cameraObject.transform.translation = {0.0f, 0.0f, -5.0f};
+    //cameraObject.transform.rotation.y = glm::radians(225.f);
+    //cameraObject.transform.rotation.x = glm::radians(-30.f);
 }
 
 FirstApp::~FirstApp() 
@@ -120,7 +120,7 @@ void FirstApp::run()
             ImGui_ImplGlfw_Sleep(10);
             continue;
         }
-
+        imguiSystem->newFrame();
         auto newTime = std::chrono::high_resolution_clock::now();
         float frameTime = std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
         currentTime = newTime;
@@ -214,13 +214,14 @@ void FirstApp::createRenderPass()
         VkAttachmentReference{5, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
     };
 
+    VkAttachmentReference lightingDepthReference = {5, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     VkSubpassDescription lightingSubpass{};
     lightingSubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     lightingSubpass.colorAttachmentCount = 1;
     lightingSubpass.pColorAttachments = &swapchainReference; // 输出到 Swapchain
     lightingSubpass.inputAttachmentCount = static_cast<uint32_t>(inputReferences.size());
     lightingSubpass.pInputAttachments = inputReferences.data(); // 读取 G-Buffer
-
+    lightingSubpass.pDepthStencilAttachment = &lightingDepthReference;
 
     // --- 4. 建立同步屏障 (Subpass Dependencies) ---
     std::array<VkSubpassDependency, 2> dependencies{};
@@ -313,13 +314,40 @@ void FirstApp::recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, fl
     renderPassInfo.pClearValues = clearValues.data();
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-    // ==========================================
-    // ✅ 【大清洗】：彻底抛弃旧的硬编码矩阵，接入光学系统！
-    // ==========================================
     GlobalUbo ubo{};
     ubo.projectionView = camera.getProjection() * camera.getView();
     ubo.cameraPos = glm::vec4(cameraObject.transform.translation, 1.0f); // 同步真实眼睛坐标
+
+    {
+        float time = static_cast<float>(glfwGetTime()); 
+        
+        ubo.numLights = MAX_POINT_LIGHTS; // 激活全部 100 个光源
+
+        for (int i = 0; i < ubo.numLights; i++) 
+        {
+            // 利用时间和索引，制造交错的旋转动画
+            float angle = i * glm::two_pi<float>() /100.0f + time/5.0f; // 每个光源的角度不同，整体旋转周期为 5 秒
+            float radius =5.0; // 散布在 10~20 米的半径内
+            float height =-10+(i % 10)*2.0f; // 高低错落
+
+            // 计算位置 (X, Y, Z) 并打包半径 (W = 15.0f)
+            ubo.pointLights[i].position = glm::vec4(
+                cos(angle) * radius, 
+                height, 
+                sin(angle) * radius, 
+                15.0f 
+            );
+
+            float colorAngle = (i/100.0f)*3.14159f; // 颜色变化更慢一些
+            ubo.pointLights[i].color = glm::vec4(
+                glm::abs(sin(colorAngle * 2.0f)), 
+                glm::abs(cos(colorAngle * 0.5f)), 
+                1.0f - glm::abs(sin(colorAngle)), 
+                50.0f
+            );
+        }
+    }
+
     memcpy(uboMapped, &ubo, sizeof(ubo));
 
     // 动态获取时间 (为了给可能存在的物体做动画)
@@ -347,7 +375,7 @@ void FirstApp::recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, fl
 
     // --- Subpass 1: Lighting Pass ---
     lightingSystem->render(frameInfo); 
-
+    lightingSystem->renderDebugLights(frameInfo, quadSphereModel);
     // 在全屏光照画完之后，把 ImGui 监控面板盖在屏幕最上层！
     imguiSystem->render(commandBuffer, cameraObject, dt);
 
@@ -760,11 +788,11 @@ void FirstApp::loadAllPBRTextures()
     std::cout << "[Sentinel 通报] 正在装填 PBR 弹药库...\n";
 
     // 只有 Albedo 是 sRGB 视觉颜色
-    createSingleTexture(basePath + "albedo.png", albedoTex, VK_FORMAT_R8G8B8A8_SRGB);
+    createSingleTexture(basePath + "RuslLessRL/albedo.jpg", albedoTex, VK_FORMAT_R8G8B8A8_UNORM);
     // 其余全部是 UNORM 物理数据！
-    createSingleTexture(basePath + "normal.jpg", normalTex, VK_FORMAT_R8G8B8A8_UNORM);
-    createSingleTexture(basePath + "metallic.jpg", metallicTex, VK_FORMAT_R8G8B8A8_UNORM);
-    createSingleTexture(basePath + "roughness.jpg", roughnessTex, VK_FORMAT_R8G8B8A8_UNORM);
+    createSingleTexture(basePath + "RuslLessRL/normal.jpg", normalTex, VK_FORMAT_R8G8B8A8_UNORM);
+    createSingleTexture(basePath + "RuslLessRL/metallic.jpg", metallicTex, VK_FORMAT_R8G8B8A8_UNORM);
+    createSingleTexture(basePath + "RuslLessRL/roughness.jpg", roughnessTex, VK_FORMAT_R8G8B8A8_UNORM);
 
     std::cout << "[Sentinel 通报] 4 发 PBR 贴图已全部成功轰入 GPU 核心金库！\n";
     std::cout << "[Sentinel 通报] 正在装填 HDR 环境辐射图...\n";
@@ -933,22 +961,38 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
 
 void FirstApp::loadGameObjects() 
 {
+
     // 1. 创建茶壶实体 (Entity)
     // 注意：createModelFromFile 原本返回 unique_ptr，它会自动转换为 shared_ptr，被所有引用它的物体共享
-    std::shared_ptr<VulkanModel> teapotModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/teapot.obj");
+    quadSphereModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/debug_cube.obj");
+    std::shared_ptr<VulkanModel> teapotModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/Quad-Sphere.obj");
     
     VulkanGameObject teapot = VulkanGameObject::createGameObject();
     teapot.model = teapotModel; // 挂载模型组件
+    teapot.transform.rotation = {0.0f, 0.0f, 0.0f}; // 挂载旋转组件，顺时针旋转 180 度，面向正 Z 轴
     teapot.transform.translation = {0.0f, 0.0f, 0.0f}; // 挂载位置组件
-    teapot.transform.scale = {0.2f, 0.2f, 0.2f};       // 挂载缩放组件
+    teapot.transform.scale = {1.0f, 1.0f, 1.0f};       // 挂载缩放组件
     
     gameObjects.push_back(std::move(teapot)); // 扔进世界
+
+
+    std::shared_ptr<VulkanModel> planeModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/plane.obj");
+    
+    VulkanGameObject grid = VulkanGameObject::createGameObject();
+    grid.model = planeModel;
+    grid.isGrid = true;
+    grid.transform.translation = {0.0f, -100.0f, 0.0f}; // 稍微往下放一点，垫在茶壶下面
+    grid.transform.scale = {1000.0f, 1000.0f, 1000.0f};    // 铺开 100 倍
+    
+    gameObjects.push_back(std::move(grid));
+
 
     // 2. 创建天空盒实体
     std::shared_ptr<VulkanModel> sphereModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/sphere.obj");
     
     VulkanGameObject skybox = VulkanGameObject::createGameObject();
     skybox.model = sphereModel;
+    skybox.transform.scale = {0.1f, 0.1f, 0.1f}; // 放大到足够包裹整个场景的尺寸
     skybox.isSkybox = true; // 挂载天空盒特征标签
     
     gameObjects.push_back(std::move(skybox)); // 扔进世界
@@ -1013,7 +1057,8 @@ void FirstApp::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameB
     viewInfo.subresourceRange.layerCount = 1;
     viewInfo.image = attachment->image;
 
-    if (vkCreateImageView(vulkanDevice->getDevice(), &viewInfo, nullptr, &attachment->view) != VK_SUCCESS) {
+    if (vkCreateImageView(vulkanDevice->getDevice(), &viewInfo, nullptr, &attachment->view) != VK_SUCCESS) 
+    {
         throw std::runtime_error("[致命错误] G-Buffer ImageView 创建失败！");
     }
 }

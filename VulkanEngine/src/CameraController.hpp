@@ -26,8 +26,8 @@ public:
 
 private:
     KeyMappings keys{};
-    float moveSpeed{500.f}; // 移动速度
-    float lookSpeed{1.5f};  // 鼠标灵敏度
+    float moveSpeed{5.0f}; // 移动速度
+    float lookSpeed{1.0f};  // 鼠标灵敏度
 
     // PC 端鼠标状态缓存
     double lastMouseX = 0.0;
