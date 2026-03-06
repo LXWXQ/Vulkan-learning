@@ -3,7 +3,8 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 
-class VulkanCamera {
+class VulkanCamera 
+{
 public:
     void setPerspectiveProjection(float fovy, float aspect, float near, float far);
     void setViewYXZ(glm::vec3 position, glm::vec3 rotation);

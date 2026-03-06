@@ -1,7 +1,7 @@
 #include "VulkanSwapchain.hpp"
 #include <stdexcept>
 #include <array>
-// 构造函数：顺藤摸瓜，初始化传送带和护目镜
+
 VulkanSwapchain::VulkanSwapchain(VulkanDevice& deviceRef, VkExtent2D windowExtent)
     : device(deviceRef), windowExtent(windowExtent) 
 {
@@ -10,7 +10,6 @@ VulkanSwapchain::VulkanSwapchain(VulkanDevice& deviceRef, VkExtent2D windowExten
     createDepthResources();
 }
 
-// 析构函数：砸碎相框、护目镜和传送带
 VulkanSwapchain::~VulkanSwapchain() 
 {
     vkDestroyImageView(device.getDevice(), depthImageView, nullptr);
@@ -35,13 +34,11 @@ VulkanSwapchain::~VulkanSwapchain()
 
 void VulkanSwapchain::createSwapChain() 
 {
-    // 1. 通过 device 引用，查询物理设备的交换链能力
     VulkanDevice::SwapChainSupportDetails swapChainSupport = device.querySwapChainSupport(device.getPhysicalDevice());
 
-    // 哨兵简化：直接取第一个格式和 FIFO 模式
     VkSurfaceFormatKHR surfaceFormat = swapChainSupport.formats[0];
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
-    VkExtent2D extent = windowExtent; // 这里直接使用传入的窗口大小
+    VkExtent2D extent = windowExtent;
 
     uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
     if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) 
@@ -51,7 +48,7 @@ void VulkanSwapchain::createSwapChain()
 
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    createInfo.surface = device.getSurface(); // 直接从 Device 类获取 Surface
+    createInfo.surface = device.getSurface();
     createInfo.minImageCount = imageCount;
     createInfo.imageFormat = surfaceFormat.format;
     createInfo.imageColorSpace = surfaceFormat.colorSpace;
@@ -83,7 +80,6 @@ void VulkanSwapchain::createSwapChain()
         throw std::runtime_error("failed to create swap chain!");
     }
 
-    // 获取交换链的图片
     vkGetSwapchainImagesKHR(device.getDevice(), swapChain, &imageCount, nullptr);
     swapChainImages.resize(imageCount);
     vkGetSwapchainImagesKHR(device.getDevice(), swapChain, &imageCount, swapChainImages.data());
@@ -103,8 +99,7 @@ void VulkanSwapchain::createImageViews()
         createInfo.image = swapChainImages[i];
         createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         createInfo.format = swapChainImageFormat;
-        
-        // RGBA 通道映射
+
         createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
         createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
         createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
@@ -123,7 +118,6 @@ void VulkanSwapchain::createImageViews()
     }
 }
 
-// 这个函数必须被单独拿出来，因为 Framebuffer 依赖于 RenderPass
 void VulkanSwapchain::createFramebuffers(VkRenderPass renderPass) 
 {
     swapChainFramebuffers.resize(swapChainImageViews.size());
@@ -133,12 +127,12 @@ void VulkanSwapchain::createFramebuffers(VkRenderPass renderPass)
         std::array<VkImageView, 2> attachments = 
         {
             swapChainImageViews[i],
-            depthImageView // 【新增】把深度视图也嵌进相框
+            depthImageView
         };
 
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = renderPass; // 外部注入工序单
+        framebufferInfo.renderPass = renderPass;
         framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
         framebufferInfo.pAttachments = attachments.data();
         framebufferInfo.width = swapChainExtent.width;
@@ -155,8 +149,6 @@ void VulkanSwapchain::createFramebuffers(VkRenderPass renderPass)
 void VulkanSwapchain::createDepthResources() 
 {
     depthFormat = device.findDepthFormat();
-
-    // 1. 创建逻辑 Image
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -177,7 +169,6 @@ void VulkanSwapchain::createDepthResources()
         throw std::runtime_error("failed to create depth image!");
     }
 
-    // 2. 申请并绑定物理显存
     VkMemoryRequirements memRequirements;
     vkGetImageMemoryRequirements(device.getDevice(), depthImage, &memRequirements);
 
@@ -192,7 +183,6 @@ void VulkanSwapchain::createDepthResources()
     }
     vkBindImageMemory(device.getDevice(), depthImage, depthImageMemory, 0);
 
-    // 3. 创建 Image View (给管线戴上护目镜)
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = depthImage;

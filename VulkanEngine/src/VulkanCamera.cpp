@@ -2,7 +2,8 @@
 #include <cassert>
 #include <limits>
 
-void VulkanCamera::setPerspectiveProjection(float fovy, float aspect, float near, float far) {
+void VulkanCamera::setPerspectiveProjection(float fovy, float aspect, float near, float far) 
+{
     assert(glm::abs(aspect - std::numeric_limits<float>::epsilon()) > 0.0f);
     const float tanHalfFovy = tan(fovy / 2.f);
     projectionMatrix = glm::mat4{0.0f};
@@ -11,10 +12,11 @@ void VulkanCamera::setPerspectiveProjection(float fovy, float aspect, float near
     projectionMatrix[2][2] = far / (far - near);
     projectionMatrix[2][3] = 1.f;
     projectionMatrix[3][2] = -(far * near) / (far - near);
-    projectionMatrix[1][1] *= -1; // 修正 Vulkan Y 轴
+    projectionMatrix[1][1] *= -1;
 }
 
-void VulkanCamera::setViewYXZ(glm::vec3 position, glm::vec3 rotation) {
+void VulkanCamera::setViewYXZ(glm::vec3 position, glm::vec3 rotation) 
+{
     const float c3 = glm::cos(rotation.z);
     const float s3 = glm::sin(rotation.z);
     const float c2 = glm::cos(rotation.x);

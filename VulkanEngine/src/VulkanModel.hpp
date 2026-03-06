@@ -4,7 +4,6 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
-// 【新增】引入 GLM 的哈希扩展
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/hash.hpp>
 
@@ -12,13 +11,14 @@
 #include <memory>
 #include <string>
 
-struct Vertex {
+struct Vertex 
+{
     glm::vec3 position;
     glm::vec3 color;
     glm::vec3 normal;
     glm::vec2 uv;
-    // 重载 == 运算符，用于哈希表判断两个顶点是否完全一样
-    bool operator==(const Vertex& other) const {
+    bool operator==(const Vertex& other) const
+    {
         return position == other.position && color == other.color && normal == other.normal&& uv == other.uv;;
     }
 
@@ -31,12 +31,12 @@ struct Vertex {
         return bindingDescription;
     }
 
-    static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
+    static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() 
+    {
         std::vector<VkVertexInputAttributeDescription> attributeDescriptions(4);
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
-        // 【修改】告知 GPU 这里现在是 3 个 float (R32G32B32)
         attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT; 
         attributeDescriptions[0].offset = offsetof(Vertex, position);
 
@@ -46,7 +46,7 @@ struct Vertex {
         attributeDescriptions[1].offset = offsetof(Vertex, color);
 
         attributeDescriptions[2].binding = 0;
-        attributeDescriptions[2].location = 2; // 对应 Shader 里的 location = 2
+        attributeDescriptions[2].location = 2;
         attributeDescriptions[2].format = VK_FORMAT_R32G32B32_SFLOAT;
         attributeDescriptions[2].offset = offsetof(Vertex, normal);
 
@@ -59,7 +59,6 @@ struct Vertex {
     }
 };
 
-// 【核心架构】向 std 命名空间注入 Vertex 的哈希算法
 namespace std 
 {
     template<> struct hash<Vertex> 
@@ -75,24 +74,22 @@ namespace std
     };
 }
 
-class VulkanModel {
+class VulkanModel 
+{
 public:
-    // 【新增】模型数据建造者
-    struct Builder {
+    struct Builder 
+    {
         std::vector<Vertex> vertices;
         std::vector<uint32_t> indices;
         void loadModel(const std::string& filepath);
     };
 
-    // 依然可以通过传入顶点和索引来创建
     VulkanModel(VulkanDevice& device, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices);
     VulkanModel(VulkanDevice& device, const VulkanModel::Builder& builder);
     ~VulkanModel();
 
     VulkanModel(const VulkanModel&) = delete;
     VulkanModel& operator=(const VulkanModel&) = delete;
-
-    // 【新增】静态工厂方法：直接从文件读取并生成 Model 对象
     static std::unique_ptr<VulkanModel> createModelFromFile(VulkanDevice& device, const std::string& filepath);
 
     void bind(VkCommandBuffer commandBuffer);

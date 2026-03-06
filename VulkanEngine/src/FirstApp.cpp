@@ -4,23 +4,18 @@
 #include <iostream>
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
-// 构造函数：控制引擎点火顺序
+
 FirstApp::FirstApp() 
 {
     initWindow();
-    // 1. 建厂
     vulkanDevice = std::make_unique<VulkanDevice>(window);
     loadGameObjects();
     createCommandPool();
-    // 2. 建传送带
     VkExtent2D extent{WIDTH, HEIGHT};
     vulkanSwapchain = std::make_unique<VulkanSwapchain>(*vulkanDevice, extent);
     createGBufferResources();
-    // 3. 制定工序单，并为传送带挂上工序单
     createRenderPass();
     createFramebuffers();
-    
-    // 4. 组建生产线 (Pipeline)，注意它依赖工序单和传送带的分辨率
     createDescriptorSetLayout();
     loadAllPBRTextures(); 
     createUniformBuffers();
@@ -29,17 +24,12 @@ FirstApp::FirstApp()
 
     geometrySystem = std::make_unique<GeometrySystem>(*vulkanDevice, renderPass, globalSetLayout);
     lightingSystem = std::make_unique<LightingSystem>(*vulkanDevice, renderPass, globalSetLayout);
-    // 5. 组建指挥部与红绿灯 (命令池和同步对象)
     
     createCommandBuffers();
     createSyncObjects();
 
     imguiSystem = std::make_unique<ImGuiSystem>(window, *vulkanDevice, renderPass, vulkanSwapchain->imageCount(), commandPool);
-
-    // 设置相机的初始位置 (站在远处看茶壶)
     cameraObject.transform.translation = {0.0f, 0.0f, -5.0f};
-    //cameraObject.transform.rotation.y = glm::radians(225.f);
-    //cameraObject.transform.rotation.x = glm::radians(-30.f);
 }
 
 FirstApp::~FirstApp() 
@@ -71,7 +61,6 @@ FirstApp::~FirstApp()
         vkFreeMemory(vulkanDevice->getDevice(), tex.memory, nullptr);
     };
 
-    // PBR 阵列
     destroyTexture(albedoTex);
     destroyTexture(normalTex);
     destroyTexture(metallicTex);
@@ -94,7 +83,8 @@ FirstApp::~FirstApp()
     glfwTerminate();
 }
 
-void FirstApp::initWindow() {
+void FirstApp::initWindow() 
+{
 
     glfwInit();
 
@@ -109,14 +99,15 @@ void FirstApp::initWindow() {
 void FirstApp::run() 
 {
     VulkanCamera camera{};
-    CameraController cameraController{}; // 实例化控制器
+    CameraController cameraController{};
 
     auto currentTime = std::chrono::high_resolution_clock::now();
 
     while (!glfwWindowShouldClose(window)) 
     {
         glfwPollEvents();
-        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0) {
+        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0) 
+        {
             ImGui_ImplGlfw_Sleep(10);
             continue;
         }
@@ -125,18 +116,12 @@ void FirstApp::run()
         float frameTime = std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
         currentTime = newTime;
 
-        // ==========================================
-        // 跨平台输入分发系统
-        // ==========================================
 #ifdef __ANDROID__
-        // 如果宏定义为安卓平台，走虚拟触控接口
         cameraController.processAndroidTouchInput(frameTime, cameraObject);
 #else
-        // PC 端：走传统的 GLFW 键鼠硬核控制
         cameraController.processPCInput(window, frameTime, cameraObject);
 #endif
 
-        // 更新光学镜头矩阵
         camera.setViewYXZ(cameraObject.transform.translation, cameraObject.transform.rotation);
         float aspect = vulkanSwapchain->getSwapChainExtent().width / (float)vulkanSwapchain->getSwapChainExtent().height;
         camera.setPerspectiveProjection(glm::radians(60.f), aspect, 0.1f, 5000.f);
@@ -148,22 +133,18 @@ void FirstApp::run()
 
 void FirstApp::createRenderPass() 
 {
-    // --- 1. 定义 6 个 Attachments (附件) ---
     std::array<VkAttachmentDescription, 6> attachments{};
-
-    // 0: Swapchain (最终输出到屏幕)
     attachments[0].format = vulkanSwapchain->getSwapChainImageFormat();
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // 必须存下来给屏幕显示
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    // 1-4: G-Buffer 颜色附件 (Position, Normal, Albedo, PBR)
-    // 【核心性能奥义】：storeOp 设为 DONT_CARE！因为在 Subpass 1 算完光照后，这些几何数据就可以丢弃了，绝不要写回主显存！
-    for (int i = 1; i <= 4; i++) {
+    for (int i = 1; i <= 4; i++) 
+    {
         attachments[i].format = (i == 1 || i == 2) ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
         attachments[i].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -171,23 +152,20 @@ void FirstApp::createRenderPass()
         attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // 结束时作为输入附件供下一个 Subpass 读取
         attachments[i].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; 
     }
 
-    // 5: G-Buffer 深度附件
     attachments[5].format = vulkanDevice->findDepthFormat();
     attachments[5].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[5].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[5].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; // 深度也无需写回
+    attachments[5].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[5].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[5].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[5].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[5].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-
-    // --- 2. 划定 Subpass 0: Geometry Pass (几何装填) ---
-    std::array<VkAttachmentReference, 4> colorReferences = {
+    std::array<VkAttachmentReference, 4> colorReferences = 
+    {
         VkAttachmentReference{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
         VkAttachmentReference{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
         VkAttachmentReference{3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
@@ -201,12 +179,10 @@ void FirstApp::createRenderPass()
     geometrySubpass.pColorAttachments = colorReferences.data();
     geometrySubpass.pDepthStencilAttachment = &depthReference;
 
-
-    // --- 3. 划定 Subpass 1: Lighting Pass (光照合成) ---
     VkAttachmentReference swapchainReference = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     
-    // 把刚才 Subpass 0 写好的 5 张图，作为输入附件 (Input Attachment) 喂给 Subpass 1
-    std::array<VkAttachmentReference, 5> inputReferences = {
+    std::array<VkAttachmentReference, 5> inputReferences = 
+    {
         VkAttachmentReference{1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         VkAttachmentReference{2, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         VkAttachmentReference{3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
@@ -218,15 +194,13 @@ void FirstApp::createRenderPass()
     VkSubpassDescription lightingSubpass{};
     lightingSubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     lightingSubpass.colorAttachmentCount = 1;
-    lightingSubpass.pColorAttachments = &swapchainReference; // 输出到 Swapchain
+    lightingSubpass.pColorAttachments = &swapchainReference;
     lightingSubpass.inputAttachmentCount = static_cast<uint32_t>(inputReferences.size());
-    lightingSubpass.pInputAttachments = inputReferences.data(); // 读取 G-Buffer
+    lightingSubpass.pInputAttachments = inputReferences.data();
     lightingSubpass.pDepthStencilAttachment = &lightingDepthReference;
 
-    // --- 4. 建立同步屏障 (Subpass Dependencies) ---
     std::array<VkSubpassDependency, 2> dependencies{};
 
-    // 依赖 1：让 Subpass 0 等待图像就绪
     dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[0].dstSubpass = 0;
     dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
@@ -234,7 +208,6 @@ void FirstApp::createRenderPass()
     dependencies[0].srcAccessMask = 0;
     dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-    // 依赖 2：让 Subpass 1 等待 Subpass 0 把颜色和深度写完，然后再以 Input Attachment 方式读取 (像素级按区域同步)
     dependencies[1].srcSubpass = 0;
     dependencies[1].dstSubpass = 1;
     dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
@@ -243,7 +216,6 @@ void FirstApp::createRenderPass()
     dependencies[1].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
     dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
-    // --- 5. 组装最终 RenderPass ---
     std::array<VkSubpassDescription, 2> subpasses = {geometrySubpass, lightingSubpass};
 
     VkRenderPassCreateInfo renderPassInfo{};
@@ -255,7 +227,8 @@ void FirstApp::createRenderPass()
     renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
     renderPassInfo.pDependencies = dependencies.data();
 
-    if (vkCreateRenderPass(vulkanDevice->getDevice(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+    if (vkCreateRenderPass(vulkanDevice->getDevice(), &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) 
+    {
         throw std::runtime_error("[致命错误] 延迟渲染双子通道 RenderPass 创建失败！");
     }
 }
@@ -285,118 +258,6 @@ void FirstApp::createCommandBuffers()
     if (vkAllocateCommandBuffers(vulkanDevice->getDevice(), &allocInfo, &commandBuffer) != VK_SUCCESS) 
     {
         throw std::runtime_error("failed to allocate command buffers!");
-    }
-}
-
-// ✅ 【修改】：更新签名
-void FirstApp::recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, float dt) 
-{
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = renderPass;
-    renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = vulkanSwapchain->getSwapChainExtent();
-    renderPassInfo.framebuffer = framebuffers[imageIndex];
-
-    std::array<VkClearValue, 6> clearValues{};
-    clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; 
-    clearValues[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
-    clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
-    clearValues[3].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
-    clearValues[4].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
-    clearValues[5].depthStencil = {1.0f, 0}; 
-
-    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
-
-    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    GlobalUbo ubo{};
-    ubo.projectionView = camera.getProjection() * camera.getView();
-    ubo.cameraPos = glm::vec4(cameraObject.transform.translation, 1.0f); // 同步真实眼睛坐标
-
-    {
-        float time = static_cast<float>(glfwGetTime()); 
-        
-        ubo.numLights = MAX_POINT_LIGHTS; // 激活全部 100 个光源
-
-        for (int i = 0; i < ubo.numLights; i++) 
-        {
-            // 利用时间和索引，制造交错的旋转动画
-            float angle = i * glm::two_pi<float>() /100.0f + time/5.0f; // 每个光源的角度不同，整体旋转周期为 5 秒
-            float radius =5.0; // 散布在 10~20 米的半径内
-            float height =-10+(i % 10)*2.0f; // 高低错落
-
-            // 计算位置 (X, Y, Z) 并打包半径 (W = 15.0f)
-            ubo.pointLights[i].position = glm::vec4(
-                cos(angle) * radius, 
-                height, 
-                sin(angle) * radius, 
-                15.0f 
-            );
-
-            float colorAngle = (i/100.0f)*3.14159f; // 颜色变化更慢一些
-            ubo.pointLights[i].color = glm::vec4(
-                glm::abs(sin(colorAngle * 2.0f)), 
-                glm::abs(cos(colorAngle * 0.5f)), 
-                1.0f - glm::abs(sin(colorAngle)), 
-                50.0f
-            );
-        }
-    }
-
-    memcpy(uboMapped, &ubo, sizeof(ubo));
-
-    // 动态获取时间 (为了给可能存在的物体做动画)
-    static auto startTime = std::chrono::high_resolution_clock::now();
-    float time = std::chrono::duration<float, std::chrono::seconds::period>(std::chrono::high_resolution_clock::now() - startTime).count();
-
-    if (!gameObjects.empty()) 
-    {
-        gameObjects[0].transform.rotation.y = time * glm::radians(45.0f); // 依然可以让茶壶自转
-    }
-
-    FrameInfo frameInfo{
-        imageIndex,
-        dt,            // 使用传入的 delta time
-        commandBuffer,
-        globalDescriptorSet,
-        gameObjects
-    };
-
-    // --- Subpass 0: Geometry Pass ---
-    geometrySystem->render(frameInfo);
-
-    // --- 切换到 Subpass 1 ---
-    vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
-
-    // --- Subpass 1: Lighting Pass ---
-    lightingSystem->render(frameInfo); 
-    lightingSystem->renderDebugLights(frameInfo, quadSphereModel);
-    // 在全屏光照画完之后，把 ImGui 监控面板盖在屏幕最上层！
-    imguiSystem->render(commandBuffer, cameraObject, dt);
-
-    vkCmdEndRenderPass(commandBuffer);
-    vkEndCommandBuffer(commandBuffer);
-}
-
-void FirstApp::createSyncObjects() 
-{
-    VkSemaphoreCreateInfo semaphoreInfo{};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-    if (vkCreateSemaphore(vulkanDevice->getDevice(), &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-        vkCreateSemaphore(vulkanDevice->getDevice(), &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
-        vkCreateFence(vulkanDevice->getDevice(), &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("failed to create sync objects!");
     }
 }
 
@@ -443,14 +304,115 @@ void FirstApp::drawFrame(VulkanCamera& camera, float dt)
     vkQueuePresentKHR(vulkanDevice->getPresentQueue(), &presentInfo);
 }
 
+void FirstApp::recordCommandBuffer(uint32_t imageIndex, VulkanCamera& camera, float dt) 
+{
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    VkRenderPassBeginInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = renderPass;
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = vulkanSwapchain->getSwapChainExtent();
+    renderPassInfo.framebuffer = framebuffers[imageIndex];
+
+    std::array<VkClearValue, 6> clearValues{};
+    clearValues[0].color = {{0.01f, 0.01f, 0.01f, 1.0f}}; 
+    clearValues[1].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[3].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[4].color = {{0.0f, 0.0f, 0.0f, 0.0f}};    
+    clearValues[5].depthStencil = {1.0f, 0}; 
+
+    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    renderPassInfo.pClearValues = clearValues.data();
+
+    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    GlobalUbo ubo{};
+    ubo.projectionView = camera.getProjection() * camera.getView();
+    ubo.cameraPos = glm::vec4(cameraObject.transform.translation, 1.0f);
+
+    {
+        float time = static_cast<float>(glfwGetTime()); 
+        
+        ubo.numLights = MAX_POINT_LIGHTS;
+
+        for (int i = 0; i < ubo.numLights; i++) 
+        {
+            float angle = i * glm::two_pi<float>() /100.0f + time/5.0f;
+            float radius =5.0;
+            float height =-10+(i % 10)*2.0f;
+            ubo.pointLights[i].position = glm::vec4(
+                cos(angle) * radius, 
+                height, 
+                sin(angle) * radius, 
+                15.0f 
+            );
+
+            float colorAngle = (i/100.0f)*3.14159f; // 颜色变化更慢一些
+            ubo.pointLights[i].color = glm::vec4(
+                glm::abs(sin(colorAngle * 2.0f)), 
+                glm::abs(cos(colorAngle * 0.5f)), 
+                1.0f - glm::abs(sin(colorAngle)), 
+                50.0f
+            );
+        }
+    }
+
+    memcpy(uboMapped, &ubo, sizeof(ubo));
+    static auto startTime = std::chrono::high_resolution_clock::now();
+    float time = std::chrono::duration<float, std::chrono::seconds::period>(std::chrono::high_resolution_clock::now() - startTime).count();
+
+    if (!gameObjects.empty()) 
+    {
+        gameObjects[0].transform.rotation.y = time * glm::radians(45.0f);
+    }
+
+    FrameInfo frameInfo{
+        imageIndex,
+        dt,           
+        commandBuffer,
+        globalDescriptorSet,
+        gameObjects
+    };
+
+    geometrySystem->render(frameInfo);
+    vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+
+    lightingSystem->render(frameInfo); 
+    lightingSystem->renderDebugLights(frameInfo, quadSphereModel);
+    imguiSystem->render(commandBuffer, cameraObject, dt);
+
+    vkCmdEndRenderPass(commandBuffer);
+    vkEndCommandBuffer(commandBuffer);
+}
+
+void FirstApp::createSyncObjects() 
+{
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    if (vkCreateSemaphore(vulkanDevice->getDevice(), &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+        vkCreateSemaphore(vulkanDevice->getDevice(), &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
+        vkCreateFence(vulkanDevice->getDevice(), &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) 
+    {
+        throw std::runtime_error("failed to create sync objects!");
+    }
+}
+
+
+
 void FirstApp::createDescriptorSetLayout()
  {
-    // 描述我们要绑定的 UBO
     VkDescriptorSetLayoutBinding uboLayoutBinding{};
-    uboLayoutBinding.binding = 0; // 对应 Shader 里的 binding = 0
+    uboLayoutBinding.binding = 0;
     uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     uboLayoutBinding.descriptorCount = 1;
-    // 只有顶点和片段着色器需要读取全局光照和矩阵
     uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; 
     uboLayoutBinding.pImmutableSamplers = nullptr;
 
@@ -482,7 +444,8 @@ void FirstApp::createDescriptorSetLayout()
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
     layoutInfo.pBindings = bindings.data();
 
-    if (vkCreateDescriptorSetLayout(vulkanDevice->getDevice(), &layoutInfo, nullptr, &globalSetLayout) != VK_SUCCESS) {
+    if (vkCreateDescriptorSetLayout(vulkanDevice->getDevice(), &layoutInfo, nullptr, &globalSetLayout) != VK_SUCCESS) 
+    {
         throw std::runtime_error("无法创建 PBR 描述符集布局！");
     }
 }
@@ -490,8 +453,6 @@ void FirstApp::createDescriptorSetLayout()
 void FirstApp::createUniformBuffers() 
 {
     VkDeviceSize bufferSize = sizeof(GlobalUbo);
-
-    // 1. 创建逻辑 Buffer (用途：UNIFORM_BUFFER)
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = bufferSize;
@@ -503,7 +464,6 @@ void FirstApp::createUniformBuffers()
         throw std::runtime_error("failed to create uniform buffer!");
     }
 
-    // 2. 申请物理显存 (要求 CPU 可见，且内存自动同步)
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(vulkanDevice->getDevice(), globalUboBuffer, &memRequirements);
 
@@ -520,22 +480,17 @@ void FirstApp::createUniformBuffers()
     }
 
     vkBindBufferMemory(vulkanDevice->getDevice(), globalUboBuffer, globalUboBufferMemory, 0);
-
-    // 3. 架构师性能秘诀：永久映射 (Persistent Mapping)
-    // 我们不每次渲染都去 map/unmap，而是打开显存盖子后就不关了，每帧直接往里倒数据！
     vkMapMemory(vulkanDevice->getDevice(), globalUboBufferMemory, 0, bufferSize, 0, &uboMapped);
 }
 
 void FirstApp::createDescriptorPool() 
 {
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
-    // UBO 依然只需要 1 个
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = 1;
     
-    // 【核心扩容】：告诉内存池，我们要放 4 个图像采样器进去！
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = 5; // 4 张 PBR 贴图 + 1 张环境贴图
+    poolSizes[1].descriptorCount = 5;
 
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
     poolSizes[2].descriptorCount = 4;
@@ -544,31 +499,32 @@ void FirstApp::createDescriptorPool()
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 1; // 依然只分配一个整体的 Set
+    poolInfo.maxSets = 1;
 
-    if (vkCreateDescriptorPool(vulkanDevice->getDevice(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+    if (vkCreateDescriptorPool(vulkanDevice->getDevice(), &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) 
+    {
         throw std::runtime_error("无法创建 PBR 描述符池！");
     }
 }
 
-void FirstApp::createDescriptorSets() {
+void FirstApp::createDescriptorSets() 
+{
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPool;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &globalSetLayout;
 
-    if (vkAllocateDescriptorSets(vulkanDevice->getDevice(), &allocInfo, &globalDescriptorSet) != VK_SUCCESS) {
+    if (vkAllocateDescriptorSets(vulkanDevice->getDevice(), &allocInfo, &globalDescriptorSet) != VK_SUCCESS) 
+    {
         throw std::runtime_error("无法分配 PBR 描述符集！");
     }
 
-    // --- 准备数据指针 ---
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = globalUboBuffer;
     bufferInfo.offset = 0;
     bufferInfo.range = sizeof(GlobalUbo);
 
-    // 提取 4 张贴图的显存指针信息
     VkDescriptorImageInfo albedoInfo{albedoTex.sampler, albedoTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo normalInfo{normalTex.sampler, normalTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo metallicInfo{metallicTex.sampler, metallicTex.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -579,10 +535,8 @@ void FirstApp::createDescriptorSets() {
     VkDescriptorImageInfo normalInputInfo{VK_NULL_HANDLE, gBuffer.normal.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo albedoInputInfo{VK_NULL_HANDLE, gBuffer.albedo.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo pbrInputInfo{VK_NULL_HANDLE, gBuffer.pbr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    // --- 组装 5 条写入指令 ---
     std::array<VkWriteDescriptorSet, 10> descriptorWrites{};
-    
-    // 0 号：UBO
+
     descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     descriptorWrites[0].dstSet = globalDescriptorSet;
     descriptorWrites[0].dstBinding = 0;
@@ -591,7 +545,6 @@ void FirstApp::createDescriptorSets() {
     descriptorWrites[0].descriptorCount = 1;
     descriptorWrites[0].pBufferInfo = &bufferInfo;
 
-    // 使用一个 Lambda 表达式来简化重复的图片写入代码
     auto writeImage = [&](uint32_t binding, VkDescriptorImageInfo* imgInfo) 
     {
         VkWriteDescriptorSet write{};
@@ -611,7 +564,8 @@ void FirstApp::createDescriptorSets() {
     descriptorWrites[4] = writeImage(4, &roughnessInfo);
     descriptorWrites[5] = writeImage(5, &environmentInfo);
 
-    auto writeInput = [&](uint32_t binding, VkDescriptorImageInfo* imgInfo) {
+    auto writeInput = [&](uint32_t binding, VkDescriptorImageInfo* imgInfo) 
+    {
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet = globalDescriptorSet;
@@ -637,14 +591,13 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
     stbi_uc* pixels = stbi_load(filepath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     VkDeviceSize imageSize = texWidth * texHeight * 4;
 
-    if (!pixels) {
+    if (!pixels) 
+    {
         throw std::runtime_error("[致命错误] 纹理加载失败！路径: " + filepath + "\n原因: " + (stbi_failure_reason() ? stbi_failure_reason() : "未知"));
     }
 
-    // --- 1. 建造中转站 ---
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
-    // (此处代码和你昨天写的一模一样)
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = imageSize;
@@ -661,14 +614,12 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
     vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &stagingBufferMemory);
     vkBindBufferMemory(vulkanDevice->getDevice(), stagingBuffer, stagingBufferMemory, 0);
 
-    // --- 2. CPU 倒灌 ---
     void* data;
     vkMapMemory(vulkanDevice->getDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
     memcpy(data, pixels, static_cast<size_t>(imageSize));
     vkUnmapMemory(vulkanDevice->getDevice(), stagingBufferMemory);
     stbi_image_free(pixels); 
 
-    // --- 3. 建造金库 ---
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -677,7 +628,7 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
     imageInfo.extent.depth = 1;
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
-    imageInfo.format = format; // 【核心改变】：接收外部传入的格式！(SRGB 或 UNORM)
+    imageInfo.format = format;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -691,7 +642,6 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
     vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &outTexture.memory);
     vkBindImageMemory(vulkanDevice->getDevice(), outTexture.image, outTexture.memory, 0);
 
-    // --- 4. 屏障与搬运 ---
     VkCommandBufferAllocateInfo allocInfoCmd{};
     allocInfoCmd.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfoCmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -751,12 +701,11 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
     vkDestroyBuffer(vulkanDevice->getDevice(), stagingBuffer, nullptr);
     vkFreeMemory(vulkanDevice->getDevice(), stagingBufferMemory, nullptr);
 
-    // --- 5. 观察镜与采样器 ---
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = outTexture.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = format; // 【同步格式】
+    viewInfo.format = format;
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = 1;
@@ -784,12 +733,7 @@ void FirstApp::createSingleTexture(const std::string& filepath, TextureData& out
 void FirstApp::loadAllPBRTextures() 
 {
     std::string basePath = "../../Resources/Texture/"; // ⚠️ 请核对你的绝对路径！
-    
-    std::cout << "[Sentinel 通报] 正在装填 PBR 弹药库...\n";
-
-    // 只有 Albedo 是 sRGB 视觉颜色
     createSingleTexture(basePath + "RuslLessRL/albedo.jpg", albedoTex, VK_FORMAT_R8G8B8A8_UNORM);
-    // 其余全部是 UNORM 物理数据！
     createSingleTexture(basePath + "RuslLessRL/normal.jpg", normalTex, VK_FORMAT_R8G8B8A8_UNORM);
     createSingleTexture(basePath + "RuslLessRL/metallic.jpg", metallicTex, VK_FORMAT_R8G8B8A8_UNORM);
     createSingleTexture(basePath + "RuslLessRL/roughness.jpg", roughnessTex, VK_FORMAT_R8G8B8A8_UNORM);
@@ -802,21 +746,16 @@ void FirstApp::loadAllPBRTextures()
 void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTexture) 
 {
     int texWidth, texHeight, texChannels;
-    
-    // 【核心黑科技】：使用 stbi_loadf (带 f) 来读取绝对的物理浮点数光能！
-    // 它返回的不再是 stbi_uc* (8位整数)，而是 float* (32位浮点数)
     float* pixels = stbi_loadf(filepath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    
-    // 【容量翻倍】：宽 * 高 * 4个通道 * 每个 float 占 4 字节 = 巨大的显存开销！
     VkDeviceSize imageSize = texWidth * texHeight * 4 * sizeof(float); 
 
-    if (!pixels) {
+    if (!pixels) 
+    {
         throw std::runtime_error("[致命错误] HDR 全景图加载失败！\n路径: " + filepath + "\n原因: " + (stbi_failure_reason() ? stbi_failure_reason() : "未知"));
     }
 
     std::cout << "[Sentinel 通报] 成功萃取 HDR 浮点光能！大小: " << imageSize / 1024 / 1024 << " MB\n";
 
-    // --- 1. 建造中转站 ---
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
     VkBufferCreateInfo bufferInfo{};
@@ -834,17 +773,12 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
     allocInfo.memoryTypeIndex = vulkanDevice->findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &stagingBufferMemory);
     vkBindBufferMemory(vulkanDevice->getDevice(), stagingBuffer, stagingBufferMemory, 0);
-
-    // --- 2. CPU 倒灌 (由于是指针，memcpy 的用法和以前一模一样) ---
     void* data;
     vkMapMemory(vulkanDevice->getDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
     memcpy(data, pixels, static_cast<size_t>(imageSize));
     vkUnmapMemory(vulkanDevice->getDevice(), stagingBufferMemory);
-    
-    // 释放 float* 指针占用的 CPU 内存
     stbi_image_free(pixels); 
 
-    // --- 3. 建造浮点金库 ---
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -853,7 +787,6 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
     imageInfo.extent.depth = 1;
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
-    // 【物理空间宣告】：强制声明为 32 位浮点线性空间！
     imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT; 
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -868,7 +801,6 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
     vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &outTexture.memory);
     vkBindImageMemory(vulkanDevice->getDevice(), outTexture.image, outTexture.memory, 0);
 
-    // --- 4. 屏障与搬运 ---
     VkCommandBufferAllocateInfo allocInfoCmd{};
     allocInfoCmd.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfoCmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -928,12 +860,11 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
     vkDestroyBuffer(vulkanDevice->getDevice(), stagingBuffer, nullptr);
     vkFreeMemory(vulkanDevice->getDevice(), stagingBufferMemory, nullptr);
 
-    // --- 5. 观察镜与采样器 ---
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = outTexture.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT; // 【同步浮点格式】
+    viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = 1;
@@ -950,7 +881,7 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerInfo.anisotropyEnable = VK_TRUE;
     samplerInfo.maxAnisotropy = 16.0f;
-    // 天空穹顶的边缘不能有黑边截断
+
     samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; 
     samplerInfo.unnormalizedCoordinates = VK_FALSE;
     samplerInfo.compareEnable = VK_FALSE;
@@ -961,9 +892,6 @@ void FirstApp::createHDRTexture(const std::string& filepath, TextureData& outTex
 
 void FirstApp::loadGameObjects() 
 {
-
-    // 1. 创建茶壶实体 (Entity)
-    // 注意：createModelFromFile 原本返回 unique_ptr，它会自动转换为 shared_ptr，被所有引用它的物体共享
     quadSphereModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/debug_cube.obj");
     std::shared_ptr<VulkanModel> teapotModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/Quad-Sphere.obj");
     
@@ -986,8 +914,6 @@ void FirstApp::loadGameObjects()
     
     gameObjects.push_back(std::move(grid));
 
-
-    // 2. 创建天空盒实体
     std::shared_ptr<VulkanModel> sphereModel = VulkanModel::createModelFromFile(*vulkanDevice, "../../Resources/Models/sphere.obj");
     
     VulkanGameObject skybox = VulkanGameObject::createGameObject();
@@ -996,21 +922,11 @@ void FirstApp::loadGameObjects()
     skybox.isSkybox = true; // 挂载天空盒特征标签
     
     gameObjects.push_back(std::move(skybox)); // 扔进世界
-
-    // 【可选测试】：你可以试着解除下面这两行的注释，直接在场景里多刷出一个偏右一点的小茶壶！它的模型内存是完全复用的！
-    
-    /*VulkanGameObject teapot2 = VulkanGameObject::createGameObject();
-    teapot2.model = teapotModel; // 复用刚才的指针！
-    teapot2.transform.translation = {500.0f, 0.0f, 0.0f}; 
-    teapot2.transform.scale = {0.2f, 0.2f, 0.2f};
-    gameObjects.push_back(std::move(teapot2));
-    */
 }
+
 void FirstApp::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment) 
 {
     attachment->format = format;
-
-    // 1. 创建逻辑图像
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -1022,15 +938,14 @@ void FirstApp::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameB
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    // 核心：必须既能作为渲染目标(写入)，又能作为采样目标(读取)
     imageInfo.usage = imageInfo.usage = usage | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(vulkanDevice->getDevice(), &imageInfo, nullptr, &attachment->image) != VK_SUCCESS) {
+    if (vkCreateImage(vulkanDevice->getDevice(), &imageInfo, nullptr, &attachment->image) != VK_SUCCESS) 
+    {
         throw std::runtime_error("[致命错误] G-Buffer 附件 VkImage 创建失败！");
     }
 
-    // 2. 申请并绑定物理显存 (必须是 DEVICE_LOCAL，追求极致读写速度)
     VkMemoryRequirements memReqs;
     vkGetImageMemoryRequirements(vulkanDevice->getDevice(), attachment->image, &memReqs);
 
@@ -1039,17 +954,16 @@ void FirstApp::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameB
     allocInfo.allocationSize = memReqs.size;
     allocInfo.memoryTypeIndex = vulkanDevice->findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &attachment->memory) != VK_SUCCESS) {
+    if (vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &attachment->memory) != VK_SUCCESS) 
+    {
         throw std::runtime_error("[致命错误] G-Buffer 附件显存分配失败！");
     }
     vkBindImageMemory(vulkanDevice->getDevice(), attachment->image, attachment->memory, 0);
 
-    // 3. 创建观察镜 (ImageView)
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
-    // 智能判断是深度掩码还是颜色掩码
     viewInfo.subresourceRange.aspectMask = (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = 1;
@@ -1070,21 +984,14 @@ void FirstApp::createGBufferResources()
 
     std::cout << "[Sentinel 通报] 开始在显存中开辟 G-Buffer 防区...\n";
 
-    // 1. 坐标附件 (16位浮点)
     createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.position);
-    // 2. 法线附件 (16位浮点)
     createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.normal);
-    // 3. 颜色附件 (8位 UNORM)
     createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.albedo);
-    // 4. PBR 参数附件 (8位 UNORM)
     createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &gBuffer.pbr);
-    // 5. 深度附件 (32位浮点)
     createAttachment(vulkanDevice->findDepthFormat(), VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &gBuffer.depth);
 
-    // 6. 创建全局采样器
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    // 【架构师秘诀】：G-Buffer 必须使用 NEAREST (邻近) 采样！如果用 LINEAR，会导致前景和背景的法线/深度发生错误混合，产生光照光晕。
     samplerInfo.magFilter = VK_FILTER_NEAREST; 
     samplerInfo.minFilter = VK_FILTER_NEAREST;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -1093,7 +1000,8 @@ void FirstApp::createGBufferResources()
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.maxAnisotropy = 1.0f;
     
-    if (vkCreateSampler(vulkanDevice->getDevice(), &samplerInfo, nullptr, &gBuffer.sampler) != VK_SUCCESS) {
+    if (vkCreateSampler(vulkanDevice->getDevice(), &samplerInfo, nullptr, &gBuffer.sampler) != VK_SUCCESS) 
+    {
         throw std::runtime_error("[致命错误] G-Buffer 采样器创建失败！");
     }
 
@@ -1105,8 +1013,8 @@ void FirstApp::createFramebuffers()
     framebuffers.resize(vulkanSwapchain->imageCount());
     for (size_t i = 0; i < vulkanSwapchain->imageCount(); i++) 
     {
-        // 严格按照 RenderPass 里的 0-5 顺序装填 View
-        std::array<VkImageView, 6> attachments = {
+        std::array<VkImageView, 6> attachments = 
+        {
             vulkanSwapchain->getImageView(i), // 0: Swapchain
             gBuffer.position.view,            // 1: Position
             gBuffer.normal.view,              // 2: Normal
@@ -1124,7 +1032,8 @@ void FirstApp::createFramebuffers()
         framebufferInfo.height = vulkanSwapchain->getSwapChainExtent().height;
         framebufferInfo.layers = 1;
 
-        if (vkCreateFramebuffer(vulkanDevice->getDevice(), &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+        if (vkCreateFramebuffer(vulkanDevice->getDevice(), &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS)
+        {
             throw std::runtime_error("[致命错误] G-Buffer 帧缓冲创建失败！");
         }
     }

@@ -41,7 +41,7 @@ void main() {
     checker = mix(checker, 0.5, fade);
 
     // 最终上色
-    vec3 color = mix(vec3(0.15), vec3(0.85), checker);
+    vec3 color = mix(vec3(0.0), vec3(1.0), checker);
 
     outPosition = vec4(inWorldPos, 1.0);
     outNormal = vec4(0.0, 1.0, 0.0, 0.0); 

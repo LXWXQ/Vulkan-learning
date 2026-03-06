@@ -4,7 +4,8 @@
 #include "FrameInfo.hpp"
 #include <memory>
 
-class LightingSystem {
+class LightingSystem 
+{
 public:
     LightingSystem(VulkanDevice& device, VkRenderPass renderPass, VkDescriptorSetLayout globalSetLayout);
     ~LightingSystem();

@@ -34,12 +34,13 @@ struct GBuffer
     FrameBufferAttachment position;
     FrameBufferAttachment normal;
     FrameBufferAttachment albedo;
-    FrameBufferAttachment pbr; // R: Metallic, G: Roughness, B: AO, A: 未使用
+    FrameBufferAttachment pbr;
     FrameBufferAttachment depth;
-    VkSampler sampler; // 光照阶段采样 G-Buffer 用
+    VkSampler sampler;
 };
 
-class FirstApp {
+class FirstApp 
+{
 public:
     static constexpr int WIDTH = 1920;
     static constexpr int HEIGHT = 1080;
@@ -61,13 +62,9 @@ private:
     void createSyncObjects();
     void drawFrame(VulkanCamera& camera, float dt);
 
-    // --- 核心模块引用 (智能指针管理生命周期) ---
     GLFWwindow* window;
     std::unique_ptr<VulkanDevice> vulkanDevice;
     std::unique_ptr<VulkanSwapchain> vulkanSwapchain;
-    //std::unique_ptr<VulkanPipeline> vulkanPipeline;
-
-    // --- App 层独有的调度资源 ---
     VkRenderPass renderPass;
     VkCommandPool commandPool;
     VkCommandBuffer commandBuffer;
@@ -76,35 +73,34 @@ private:
     VkSemaphore renderFinishedSemaphore;
     VkFence inFlightFence;
 
-    void loadGameObjects(); // 添加一个加载模型的函数
+    void loadGameObjects();
 
     VkDescriptorSetLayout globalSetLayout;
     void createDescriptorSetLayout();
 
     VkBuffer globalUboBuffer;
     VkDeviceMemory globalUboBufferMemory;
-    void* uboMapped; // 永久映射的内存指针，极其高效，允许 C++ 每帧直接向显存写数据
+    void* uboMapped;
 
     VkDescriptorPool descriptorPool;
-    VkDescriptorSet globalDescriptorSet; // 交给 GPU 的那把钥匙
+    VkDescriptorSet globalDescriptorSet;
     void createUniformBuffers();
     void createDescriptorPool();
     void createDescriptorSets();
 
-    struct TextureData {
+    struct TextureData 
+    {
         VkImage image;
         VkDeviceMemory memory;
         VkImageView view;
         VkSampler sampler;
     };
 
-    // 4 张 PBR 核心贴图
     TextureData albedoTex;
     TextureData normalTex;
     TextureData metallicTex;
     TextureData roughnessTex;
 
-    // 升级后的流水线函数
     void loadAllPBRTextures();
     void createSingleTexture(const std::string& filepath, TextureData& outTexture, VkFormat format);
     TextureData environmentTex;
