@@ -1,4 +1,4 @@
-#include "src/FirstApp.hpp"
+#include "src/Core/Application.h"
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>

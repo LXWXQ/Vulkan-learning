@@ -21,7 +21,9 @@ find_package(glfw3 REQUIRED)
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
+
 list(APPEND SOURCES "main.cpp")
+
 list(APPEND SOURCES 
     "${IMGUI_DIR}/imgui.cpp"
     "${IMGUI_DIR}/imgui_demo.cpp"
@@ -42,6 +44,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${STB_DIR}"
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
+    "src"
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE 

@@ -16,15 +16,16 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 lightColor;
     vec4 cameraPos;
     int numLights;
-    PointLight pointLights[100];
+    PointLight pointLights[10];
 } ubo;
 
 layout(set = 0, binding = 5) uniform sampler2D environmentMap;
 
-layout(input_attachment_index = 0, set = 0, binding = 6) uniform subpassInput inPosition;
-layout(input_attachment_index = 1, set = 0, binding = 7) uniform subpassInput inNormal;
-layout(input_attachment_index = 2, set = 0, binding = 8) uniform subpassInput inAlbedo;
-layout(input_attachment_index = 3, set = 0, binding = 9) uniform subpassInput inPBR;
+layout(binding = 6) uniform sampler2D inPosition;
+layout(binding = 7) uniform sampler2D inNormal;
+layout(binding = 8) uniform sampler2D inAlbedo;
+layout(binding = 9) uniform sampler2D inPbr;
+layout(binding = 10) uniform sampler2D inSSAO;
 
 // ============================================================================
 // PBR 基础数学公式
@@ -141,11 +142,11 @@ vec3 ACESFilm(vec3 x) {
 
 void main() {
     // 1. 读取 G-Buffer
-    vec3 fragPosWorld = subpassLoad(inPosition).xyz;
-    vec3 N            = subpassLoad(inNormal).xyz;
-    vec3 albedo       = subpassLoad(inAlbedo).rgb;
-    vec4 pbr          = subpassLoad(inPBR);
-    
+    vec3 fragPosWorld = texture(inPosition, inUV).xyz;
+    vec3 N            = texture(inNormal, inUV).xyz;
+    vec3 albedo       = texture(inAlbedo, inUV).rgb;
+    vec4 pbr          = texture(inPbr, inUV); 
+    float ssao        = texture(inSSAO, inUV).r;
     float metallic  = pbr.r;
     float roughness = pbr.g;
     roughness = max(roughness, 0.04);

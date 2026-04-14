@@ -1,0 +1,11 @@
+# 忽略 VS 的编译缓存和临时文件
+.vs/
+out/
+build/
+*.ipch
+*.db
+*.opendb
+*.VC.db
+
+# 忽略 VS Code 自己的配置（可选）
+.vscode/
