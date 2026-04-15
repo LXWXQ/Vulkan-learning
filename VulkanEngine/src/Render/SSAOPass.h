@@ -25,7 +25,7 @@ public:
 
     void init() override;
     void execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo) override;
-
+    const std::string getName() const override { return "SSAO Pass"; }
 private:
     void generateSampleKernel();
     void createNoiseTexture();

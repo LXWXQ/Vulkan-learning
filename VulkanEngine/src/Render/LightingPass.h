@@ -21,7 +21,7 @@ public:
     VkRenderPass getRenderPass() const { return renderPass; }
     void setImGuiSystem(ImGuiSystem* imgui) { imguiSystem = imgui; }
     void setDebugModel(std::shared_ptr<Model> model) { debugModel = model; }
-
+    const std::string getName() const override { return "Lighting Pass"; }
 private:
     void createRenderPass();
     void createFramebuffers();

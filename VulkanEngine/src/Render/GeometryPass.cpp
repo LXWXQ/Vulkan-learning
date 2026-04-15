@@ -114,7 +114,7 @@ void GeometryPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     
     // 如果你 GBuffer 没暴露尺寸，可以直接硬编码 {1920, 1080} 测试，或者最好去 VulkanGBuffer.hpp 里加个 getExtent() 方法
     // renderPassInfo.renderArea.extent = gBuffer.getExtent(); 
-    renderPassInfo.renderArea.extent = {1920, 1080}; 
+    renderPassInfo.renderArea.extent = {WIDTH, HEIGHT}; 
 
     // G-Buffer 需要清空 5 张底片 (位置、法线、反照率、PBR、深度)
     std::array<VkClearValue, 5> clearValues{};
@@ -127,6 +127,24 @@ void GeometryPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
     renderPassInfo.pClearValues = clearValues.data();
 
+    VkDescriptorBufferInfo uboInfo{frameInfo.globalUboBuffer, 0, sizeof(GlobalUbo)};
+    VkDescriptorSet geometrySet;
+    
+    DescriptorBuilder::begin(frameInfo.allocator, frameInfo.globalSetLayout)
+        .bindBuffer(0, &uboInfo)
+        .bindImage(1, &frameInfo.albedoInfo)
+        .bindImage(2, &frameInfo.normalInfo)
+        .bindImage(3, &frameInfo.metallicInfo)
+        .bindImage(4, &frameInfo.roughnessInfo)
+        .bindImage(5, &frameInfo.dummyInfo) // 几何阶段不读环境光
+        .bindImage(6, &frameInfo.dummyInfo) // 正在写 GBuffer，全用替身堵上槽位！
+        .bindImage(7, &frameInfo.dummyInfo)
+        .bindImage(8, &frameInfo.dummyInfo)
+        .bindImage(9, &frameInfo.dummyInfo)
+        .bindImage(10, &frameInfo.dummyInfo) // 还没算 SSAO，用替身
+        .build(geometrySet);
+        
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, geometrySystem->getPipelineLayout(), 0, 1, &geometrySet, 0, nullptr);
     // 🔥 就是缺了这句最核心的指令！告诉 GPU 开始在这个帧缓冲上画画！
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 

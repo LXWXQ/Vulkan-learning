@@ -39,21 +39,40 @@ void LightingPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     renderPassInfo.pClearValues = clearValues.data();
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    VkDescriptorBufferInfo uboInfo{frameInfo.globalUboBuffer, 0, sizeof(GlobalUbo)};
+    VkDescriptorSet lightingSet;
+
+    DescriptorBuilder::begin(frameInfo.allocator, frameInfo.globalSetLayout)
+        .bindBuffer(0, &uboInfo)
+        .bindImage(1, &frameInfo.dummyInfo) // PBR 已经画进 GBuffer，不需要重读了
+        .bindImage(2, &frameInfo.dummyInfo)
+        .bindImage(3, &frameInfo.dummyInfo)
+        .bindImage(4, &frameInfo.dummyInfo)
+        .bindImage(5, &frameInfo.environmentInfo) // 🌟 读 IBL 环境光
+        .bindImage(6, &frameInfo.posInputInfo)    // 🌟 读 GBuffer 全家桶
+        .bindImage(7, &frameInfo.normalInputInfo)
+        .bindImage(8, &frameInfo.albedoInputInfo)
+        .bindImage(9, &frameInfo.pbrInputInfo)
+        .bindImage(10, &frameInfo.ssaoInfo)       // 🌟 读做好的 SSAO
+        .build(lightingSet);
+
+    // 绑定新鲜的 Set，并交给 System 去执行 Draw
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lightingSystem->getPipelineLayout(), 0, 1, &lightingSet, 0, nullptr);
 
     // 🌟 直接把 frameInfo 传给 System 画光照合成
     lightingSystem->render(frameInfo);
     
     // 画光源小球
-    if (debugModel != nullptr) 
+    /*if (debugModel != nullptr) 
     {
         lightingSystem->renderDebugLights(frameInfo, debugModel);
-    }
+    }*/
 
     // 画 UI
     if (imguiSystem != nullptr) 
     {
         GameObject dummyCamera = GameObject::createGameObject();
-        imguiSystem->render(commandBuffer, dummyCamera, frameInfo.frameTime); 
+        imguiSystem->render(commandBuffer, dummyCamera, frameInfo.frameTime, frameInfo.settings, frameInfo.telemetry);
     }
 
     vkCmdEndRenderPass(commandBuffer);

@@ -54,6 +54,7 @@ void main()
         // 🌟 直接用全局投影矩阵！
         vec4 offset = vec4(samplePos, 1.0);
         offset = globalUbo.projectionView * offset; 
+        if (abs(offset.w) < 0.0001) continue;
         offset.xyz /= offset.w; 
         offset.xyz = offset.xyz * 0.5 + 0.5; 
 

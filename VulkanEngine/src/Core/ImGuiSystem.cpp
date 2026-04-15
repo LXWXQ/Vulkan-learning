@@ -54,26 +54,54 @@ void ImGuiSystem::newFrame()
     ImGui::NewFrame();
 }
 
-void ImGuiSystem::render(VkCommandBuffer commandBuffer, GameObject& cameraObj, float dt) 
+void ImGuiSystem::render(VkCommandBuffer commandBuffer, GameObject& cameraObj, float dt, EngineSettings& settings, RenderTelemetry& telemetry) 
 {
     ImGui::Begin("Sentinel Engine Core");
-    ImGui::Text("Performance");
-    ImGui::Text("FPS: %.1f (%.2f ms/frame)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
-    ImGui::Separator();
 
-    ImGui::Text("Camera Telemetry");
-    ImGui::DragFloat3("Position (X,Y,Z)", &cameraObj.transform.translation.x, 1.0f);
-
-    glm::vec3 eulerAngles = glm::degrees(cameraObj.transform.rotation);
-    if (ImGui::DragFloat3("Rotation (P,Y,R)", &eulerAngles.x, 1.0f)) 
+    // ==========================================
+    // 1. 核心性能遥测 (Telemetry)
+    // ==========================================
+    if (ImGui::CollapsingHeader("Performance & Telemetry", ImGuiTreeNodeFlags_DefaultOpen)) 
     {
-        cameraObj.transform.rotation = glm::radians(eulerAngles);
+        ImGui::Text("FPS: %.1f (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+        ImGui::Text("Draw Calls : %u", telemetry.drawCalls);
+        ImGui::Text("Triangles  : %u", telemetry.triangles);
+        ImGui::Text("Vertices   : %u", telemetry.vertices);
     }
 
-    ImGui::Separator();
-    ImGui::Text("Tips:");
-    ImGui::Text("Hold [Right Mouse Button] to look around.");
-    ImGui::Text("Use [W/A/S/D/Q/E] to move.");
+    // ==========================================
+    // 2. SSAO 控制面板
+    // ==========================================
+    if (ImGui::CollapsingHeader("SSAO Settings", ImGuiTreeNodeFlags_DefaultOpen)) 
+    {
+        ImGui::SliderFloat("Radius", &settings.ssaoRadius, 0.1f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Bias", &settings.ssaoBias, 0.0f, 0.2f, "%.3f");
+        ImGui::SliderInt("Samples", &settings.ssaoKernelSize, 4, 64);
+    }
+
+    // ==========================================
+    // 3. PBR 光照控制面板
+    // ==========================================
+    if (ImGui::CollapsingHeader("PBR Lighting", ImGuiTreeNodeFlags_DefaultOpen)) 
+    {
+        ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f);
+        
+        // 用一个圆球形 UI 控制光照方向非常直观
+        ImGui::SliderFloat3("Sun Direction", &settings.directionalLightDir.x, -1.0f, 1.0f);
+        ImGui::ColorEdit3("Sun Color", &settings.directionalLightColor.x);
+    }
+
+    // ==========================================
+    // 4. 相机遥测
+    // ==========================================
+    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) 
+    {
+        ImGui::DragFloat3("Position", &cameraObj.transform.translation.x, 0.1f);
+        glm::vec3 eulerAngles = glm::degrees(cameraObj.transform.rotation);
+        if (ImGui::DragFloat3("Rotation", &eulerAngles.x, 1.0f)) {
+            cameraObj.transform.rotation = glm::radians(eulerAngles);
+        }
+    }
 
     ImGui::End();
     ImGui::Render();

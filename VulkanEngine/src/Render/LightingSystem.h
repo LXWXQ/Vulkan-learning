@@ -15,7 +15,8 @@ public:
 
     void render(FrameInfo& frameInfo);
     void createDebugLightPipeline(VkRenderPass renderPass);
-    void renderDebugLights(FrameInfo& frameInfo,std::shared_ptr<Model> sphereModel);
+    void renderDebugLights(FrameInfo& frameInfo,std::shared_ptr<Model> sphereModel, VkDescriptorSet descriptorSet);
+    VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }
 private:
     void createPipelineLayout(VkDescriptorSetLayout globalSetLayout);
     void createPipeline(VkRenderPass renderPass);

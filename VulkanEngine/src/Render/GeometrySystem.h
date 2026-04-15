@@ -13,6 +13,7 @@ public:
     GeometrySystem(const GeometrySystem&) = delete;
     GeometrySystem& operator=(const GeometrySystem&) = delete;
     void render(FrameInfo& frameInfo);
+    VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }
 
 private:
     void createPipelineLayout(VkDescriptorSetLayout globalSetLayout);

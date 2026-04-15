@@ -17,7 +17,7 @@ public:
     void onResize(VkExtent2D extent) override {}
 
     VkRenderPass getRenderPass() const { return renderPass; }
-
+    const std::string getName() const override { return "Geometry Pass"; }
 private:
     void createRenderPass();
     void createFramebuffer();

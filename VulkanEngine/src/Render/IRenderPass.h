@@ -17,4 +17,6 @@ public:
 
     // 处理窗口缩放
     virtual void onResize(VkExtent2D extent) = 0;
+
+    virtual const std::string getName() const = 0; // 每个 Pass 都要有个名字，方便调试和 ImGui 显示
 };

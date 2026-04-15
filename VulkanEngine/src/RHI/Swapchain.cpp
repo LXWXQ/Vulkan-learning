@@ -37,7 +37,7 @@ void Swapchain::createSwapChain()
     Device::SwapChainSupportDetails swapChainSupport = device.querySwapChainSupport(device.getPhysicalDevice());
 
     VkSurfaceFormatKHR surfaceFormat = swapChainSupport.formats[0];
-    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;//VK_PRESENT_MODE_FIFO_KHR 垂直同步  VK_PRESENT_MODE_IMMEDIATE_KHR 无垂直同步，可能会撕裂 VK_PRESENT_MODE_MAILBOX_KHR 低延迟，适合高帧率，可能会丢帧
     VkExtent2D extent = windowExtent;
 
     uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;

@@ -50,17 +50,13 @@ void LightingSystem::createPipeline(VkRenderPass renderPass)
 void LightingSystem::render(FrameInfo& frameInfo) 
 {
     lightingPipeline->bind(frameInfo.commandBuffer);
-
-    vkCmdBindDescriptorSets(
-        frameInfo.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipelineLayout, 0, 1, &frameInfo.globalDescriptorSet, 0, nullptr);
     vkCmdDraw(frameInfo.commandBuffer, 3, 1, 0, 0);
 }
 
 void LightingSystem::createDebugLightPipeline(VkRenderPass renderPass) 
 {
     PipelineConfigInfo config{};
-    Pipeline::defaultPipelineConfigInfo(config, 1920, 1080);
+    Pipeline::defaultPipelineConfigInfo(config, WIDTH, HEIGHT);
     
     config.renderPass = renderPass;
     config.subpass = 0;
@@ -87,19 +83,27 @@ void LightingSystem::createDebugLightPipeline(VkRenderPass renderPass)
     debugLightPipeline = std::make_unique<Pipeline>(vulkanDevice, "../shaders/light_cube.vert.spv", "../shaders/light_cube.frag.spv", config);
 }
 
-void LightingSystem::renderDebugLights(FrameInfo& frameInfo, std::shared_ptr<Model> sphereModel) 
+void LightingSystem::renderDebugLights(FrameInfo& frameInfo, std::shared_ptr<Model> sphereModel, VkDescriptorSet descriptorSet) 
 {
     debugLightPipeline->bind(frameInfo.commandBuffer);
     
     vkCmdBindDescriptorSets(
-        frameInfo.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipelineLayout, 0, 1, &frameInfo.globalDescriptorSet, 0, nullptr);
+        frameInfo.commandBuffer, 
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        pipelineLayout, 
+        0, 
+        1, 
+        &descriptorSet,
+        0, 
+        nullptr
+    );
 
     sphereModel->bind(frameInfo.commandBuffer);
 
     vkCmdDrawIndexed(
         frameInfo.commandBuffer, 
         sphereModel->getIndexCount(), 
-        100, 
-        0, 0, 0); 
+        MAX_POINT_LIGHTS, // <--- 替换硬编码的 100
+        0, 0, 0
+    );
 }

@@ -16,6 +16,7 @@
 #include "Render/GeometryPass.h"
 #include "Render/LightingPass.h"
 #include "Render/SSAOPass.h"
+#include "Core/Descriptor.h"
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -25,6 +26,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+
+
 
 
 class FirstApp 
@@ -65,8 +69,10 @@ private:
     VkDeviceMemory globalUboBufferMemory;
     void* uboMapped;
     VkDescriptorPool descriptorPool;
-    VkDescriptorSet globalDescriptorSet;
- 
+    //VkDescriptorSet globalDescriptorSet;
+    std::vector<VkDescriptorSet> frameDescriptorSets;
+    std::vector<std::unique_ptr<DescriptorAllocator>> frameDescriptorAllocators;
+
     std::unique_ptr<Texture> albedoTex;
     std::unique_ptr<Texture> normalTex;
     std::unique_ptr<Texture> metallicTex;
@@ -83,4 +89,7 @@ private:
     CameraController cameraController{};
     std::chrono::high_resolution_clock::time_point currentTime;
     std::unordered_map<std::string, VkDescriptorImageInfo> renderTargets;
+
+    EngineSettings engineSettings;
+    RenderTelemetry currentTelemetry;
 };

@@ -311,8 +311,10 @@ void SSAOPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     // 等跑通了，一定要记得把真实的相机的 projection 传进来！
     ubo.projection = frameInfo.projectionMatrix; 
     ubo.view = frameInfo.viewMatrix;
-    ubo.kernelSize = 16;
-
+    ubo.radius = frameInfo.settings.ssaoRadius;
+    ubo.bias = frameInfo.settings.ssaoBias;
+    ubo.kernelSize = frameInfo.settings.ssaoKernelSize;
+    
     memcpy(ubo.samples, ssaoKernel.data(), 16 * sizeof(glm::vec4));
     memcpy(uboMapped, &ubo, sizeof(ubo));
 
@@ -331,8 +333,27 @@ void SSAOPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
 
     ssaoPipeline->bind(commandBuffer);
     
-    // 🌟 一次绑定两套 Set！
-    VkDescriptorSet sets[] = {frameInfo.globalDescriptorSet, localSet};
+    VkDescriptorBufferInfo globalUboInfo{frameInfo.globalUboBuffer, 0, sizeof(GlobalUbo)};
+    VkDescriptorSet currentGlobalSet;
+
+    DescriptorBuilder::begin(frameInfo.allocator, frameInfo.globalSetLayout)
+        .bindBuffer(0, &globalUboInfo)
+        .bindImage(1, &frameInfo.dummyInfo) // 不读 PBR
+        .bindImage(2, &frameInfo.dummyInfo)
+        .bindImage(3, &frameInfo.dummyInfo)
+        .bindImage(4, &frameInfo.dummyInfo)
+        .bindImage(5, &frameInfo.dummyInfo)
+        .bindImage(6, &frameInfo.posInputInfo)    // 🌟 重点读 GBuffer Position
+        .bindImage(7, &frameInfo.normalInputInfo) // 🌟 重点读 GBuffer Normal
+        .bindImage(8, &frameInfo.dummyInfo)
+        .bindImage(9, &frameInfo.dummyInfo)
+        .bindImage(10, &frameInfo.dummyInfo) // 正在写 SSAO，用替身
+        .build(currentGlobalSet);
+
+    ssaoPipeline->bind(commandBuffer);
+    
+    // 🌟 完美绑定：动态 Global Set + 固定的 Local Set
+    VkDescriptorSet sets[] = {currentGlobalSet, localSet};
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 2, sets, 0, nullptr);
     
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);

@@ -75,10 +75,6 @@ void GeometrySystem::render(FrameInfo& frameInfo)
     scissor.extent = { 1920, 1080 };
     vkCmdSetScissor(frameInfo.commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindDescriptorSets(
-        frameInfo.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        pipelineLayout, 0, 1, &frameInfo.globalDescriptorSet, 0, nullptr);
-
     for (auto& obj : frameInfo.gameObjects) 
     {
         if (obj.model == nullptr) continue;
@@ -86,6 +82,11 @@ void GeometrySystem::render(FrameInfo& frameInfo)
         SimplePushConstantData push{};
         push.modelMatrix = obj.transform.mat4();
         push.normalMatrix = obj.transform.mat4();
+
+        uint32_t indexCount = obj.model->getIndexCount();
+        frameInfo.telemetry.drawCalls += 1;
+        frameInfo.telemetry.triangles += indexCount / 3;
+        frameInfo.telemetry.vertices += obj.model->getVertexCount();
 
         if (obj.isSkybox) 
         {
