@@ -121,7 +121,7 @@ void FirstApp::update(float dt)
     accumulatedTime += dt;
     if (!gameObjects.empty()) 
     {
-        gameObjects[0].transform.rotation.y = accumulatedTime * glm::radians(45.0f);
+        //gameObjects[0].transform.rotation.y = accumulatedTime * glm::radians(45.0f);
     }
 }
 
@@ -152,14 +152,14 @@ void FirstApp::render(float dt)
             float radius = 5.0f;
             float height = -10.0f + (i % 10) * 2.0f;
             ubo.pointLights[i].position = glm::vec4(cos(angle) * radius, height, sin(angle) * radius, 15.0f);
-
+            ubo.pointLights[i].color =glm::vec4(0.0f);
             float colorAngle = (i / 100.0f) * 3.14159f; 
-            ubo.pointLights[i].color = glm::vec4(
+           /* ubo.pointLights[i].color = glm::vec4(
                 glm::abs(sin(colorAngle * 2.0f)), 
                 glm::abs(cos(colorAngle * 0.5f)), 
                 1.0f - glm::abs(sin(colorAngle)), 
                 50.0f
-            );
+            );*/
         }
         memcpy(uboMapped, &ubo, sizeof(ubo));
 
@@ -284,21 +284,26 @@ void FirstApp::createUniformBuffers()
 
 void FirstApp::loadAllPBRTextures() 
 {
-    std::string basePath = "../../Resources/Texture/"; 
-    albedoTex = std::make_unique<Texture>(*vulkanDevice, basePath + "RuslLessRL/albedo.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
-    normalTex = std::make_unique<Texture>(*vulkanDevice, basePath + "RuslLessRL/normal.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
-    metallicTex = std::make_unique<Texture>(*vulkanDevice, basePath + "RuslLessRL/metallic.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
-    roughnessTex = std::make_unique<Texture>(*vulkanDevice, basePath + "RuslLessRL/roughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
+    std::string basePath = "../../Resources/"; 
+    albedoTex = std::make_unique<Texture>(*vulkanDevice, basePath + "Models/DamagedHelmet/Default_albedo.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
+    normalTex = std::make_unique<Texture>(*vulkanDevice, basePath + "Models/DamagedHelmet/Default_normal.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
+    
+    // 🌟 核心注意：在 glTF 标准中，金属度和粗糙度是合在同一张图里的！
+    // 我们暂时把这张图同时装填进 metallicTex 和 roughnessTex 槽位
+    metallicTex = std::make_unique<Texture>(*vulkanDevice, basePath + "Models/DamagedHelmet/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
+    roughnessTex = std::make_unique<Texture>(*vulkanDevice, basePath + "Models/DamagedHelmet/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, renderer->getCommandPool());
+
+    std::cout << "[Sentinel 通报] 破损头盔 PBR 贴图装填完毕！\n";
 
     std::cout << "[Sentinel 通报] 4 发 PBR 贴图已全部成功轰入 GPU 核心金库！\n";
     std::cout << "[Sentinel 通报] 正在装填 HDR 环境辐射图...\n";
-    environmentTex = std::make_unique<Texture>(*vulkanDevice, basePath + "environment.hdr", VK_FORMAT_R32G32B32A32_SFLOAT, renderer->getCommandPool(), true);
+    environmentTex = std::make_unique<Texture>(*vulkanDevice, basePath + "Texture/environment.hdr", VK_FORMAT_R32G32B32A32_SFLOAT, renderer->getCommandPool(), true);
 }
 
 void FirstApp::loadGameObjects() 
 {
     quadSphereModel = Model::createModelFromFile(*vulkanDevice, "../../Resources/Models/debug_cube.obj");
-    std::shared_ptr<Model> teapotModel = Model::createModelFromFile(*vulkanDevice, "../../Resources/Models/Quad-Sphere.obj");
+    std::shared_ptr<Model> teapotModel = Model::createModelFromFile(*vulkanDevice, "../../Resources/Models/DamagedHelmet/DamagedHelmet.obj");
     
     GameObject teapot = GameObject::createGameObject();
     teapot.model = teapotModel; 
@@ -321,10 +326,10 @@ void FirstApp::loadGameObjects()
 
     std::shared_ptr<Model> sphereModel = Model::createModelFromFile(*vulkanDevice, "../../Resources/Models/sphere.obj");
     
-    GameObject skybox = GameObject::createGameObject();
+   GameObject skybox = GameObject::createGameObject();
     skybox.model = sphereModel;
     skybox.transform.scale = {0.1f, 0.1f, 0.1f}; 
     skybox.isSkybox = true; 
     
-    gameObjects.push_back(std::move(skybox)); 
+    gameObjects.push_back(std::move(skybox));
 }

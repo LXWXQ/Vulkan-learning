@@ -59,10 +59,12 @@ void main() {
     outNormal = vec4(normalize(fragNormalWorld), 1.0);
     // 3. 基础颜色
     vec4 albedoColor = texture(albedoMap, fragUV);
-    outAlbedo = vec4(albedoColor.rgb * fragColor, albedoColor.a);
+    vec3 powC = vec3(albedoColor.rgb);
+    vec3 aliasColor = pow(powC, vec3(2.2));
+    outAlbedo = vec4(aliasColor.rgb * fragColor, albedoColor.a);
 
     // 4. PBR 参数打包 (R: 金属度, G: 粗糙度)
-    float metallic = texture(metallicMap, fragUV).r;
-    float roughness = texture(roughnessMap, fragUV).r;
-    outPBR = vec4(metallic, roughness, 1.0, 1.0);
+    float metallic = texture(metallicMap, fragUV).b; 
+    float roughness = texture(roughnessMap, fragUV).g;
+    outPBR = vec4(metallic, roughness, 0.0, 1.0);
 }
