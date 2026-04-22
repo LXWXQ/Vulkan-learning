@@ -53,6 +53,14 @@ vec3 getNormalFromMap() {
 void main() {
     // 1. 位置 (世界坐标)
     outPosition = vec4(fragPosWorld, 1.0);
+    if (length(fragNormalWorld) < 0.1)
+    {
+        outNormal = vec4(0.0, 0.0, 0.0, 1.0); 
+    } 
+    else 
+    {
+        outNormal = vec4(normalize(fragNormalWorld), 1.0);
+    }
 
     // 2. 带有凹凸细节的世界法线
     //outNormal = vec4(getNormalFromMap(), 1.0);

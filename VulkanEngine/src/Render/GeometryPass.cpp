@@ -136,7 +136,7 @@ void GeometryPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
         .bindImage(2, &frameInfo.normalInfo)
         .bindImage(3, &frameInfo.metallicInfo)
         .bindImage(4, &frameInfo.roughnessInfo)
-        .bindImage(5, &frameInfo.dummyInfo) // 几何阶段不读环境光
+        .bindImage(5, &frameInfo.environmentInfo) // 几何阶段不读环境光
         .bindImage(6, &frameInfo.dummyInfo) // 正在写 GBuffer，全用替身堵上槽位！
         .bindImage(7, &frameInfo.dummyInfo)
         .bindImage(8, &frameInfo.dummyInfo)

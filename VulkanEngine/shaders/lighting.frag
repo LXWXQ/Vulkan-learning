@@ -152,11 +152,9 @@ void main() {
     roughness = max(roughness, 0.04);
     
     // 天空盒直接放行
-    if (length(N) < 0.1) {
-        vec3 skyColor = albedo;
-        skyColor = skyColor / (skyColor + vec3(1.0));
-        skyColor = pow(skyColor, vec3(1.0/2.2));
-        outColor = vec4(skyColor, 1.0);
+    if (length(N) < 0.1) 
+    {
+        outColor = vec4(albedo, 1.0);
         return;
     }
 
