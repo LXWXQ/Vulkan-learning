@@ -2,7 +2,7 @@
 #include "Model.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
-
+#include "Core/Material.h"
 struct TransformComponent 
 {
     glm::vec3 translation{}; // 坐标
@@ -37,11 +37,12 @@ public:
     GameObject& operator=(GameObject&&) = default;
 
     id_t getId() const { return id; }
-    std::shared_ptr<Model> model{}; 
-    TransformComponent transform{};
-    bool isSkybox = false;
-    bool isGrid = false;
-
+	std::shared_ptr<Model> model{}; 
+	TransformComponent transform{};
+	bool isSkybox = false;
+	bool isGrid = false;
+	std::shared_ptr<Material> material;
+	uint32_t materialSetIndex = 0;
 private:
     GameObject(id_t objId) : id{objId} {}
     id_t id;

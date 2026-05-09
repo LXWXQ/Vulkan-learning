@@ -8,16 +8,17 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     mat4 projectionView;
 } globalUbo;
 
-layout(set = 0, binding = 6) uniform sampler2D texPosition;
-layout(set = 0, binding = 7) uniform sampler2D texNormal;
+layout(set = 0, binding = 2) uniform sampler2D texPosition;
+layout(set = 0, binding = 3) uniform sampler2D texNormal;
 
 layout(set = 1, binding = 0) uniform SSAOUbo {
-    mat4 projection; // 废弃不用了
-    mat4 view;       // 废弃不用了
+    mat4 projection;
+    mat4 view;
     vec4 samples[64];
     int kernelSize;
     float radius;
     float bias;
+    float enabled;
 } ubo;
 
 layout(set = 1, binding = 1) uniform sampler2D texNoise;
@@ -26,8 +27,7 @@ void main()
 {
     vec3 normal = texture(texNormal, inUV).xyz;
     
-    // 🌟 性能救星：天空盒没有法线，直接跳过 SSAO 计算，节省 50% 性能！
-    if (length(normal) < 0.1) {
+    if (length(normal) < 0.1 || ubo.enabled < 0.5) {
         outFragColor = vec4(1.0);
         return;
     }

@@ -6,16 +6,22 @@
 #include <backends/imgui_impl_vulkan.h>
 #include "Core/FrameInfo.h"
 
-class ImGuiSystem 
+class ImGuiSystem
 {
 public:
-    ImGuiSystem(GLFWwindow* window, Device& device, VkRenderPass renderPass, uint32_t imageCount, VkCommandPool commandPool);
-    ~ImGuiSystem();
-    void newFrame() ;
-    ImGuiSystem(const ImGuiSystem&) = delete;
-    ImGuiSystem& operator=(const ImGuiSystem&) = delete;
-    void render(VkCommandBuffer commandBuffer, GameObject& cameraObj, float dt, EngineSettings& settings, RenderTelemetry& telemetry);
+	ImGuiSystem(GLFWwindow* window, Device& device, VkRenderPass renderPass, uint32_t imageCount, VkCommandPool commandPool);
+	~ImGuiSystem();
+	void newFrame();
+	ImGuiSystem(const ImGuiSystem&) = delete;
+	ImGuiSystem& operator=(const ImGuiSystem&) = delete;
+	void render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo);
+
 private:
-    Device& vulkanDevice;
-    VkDescriptorPool imguiPool;
+	void renderPerformancePanel(float dt, RenderTelemetry& telemetry);
+	void renderSSAOPanel(EngineSettings& settings);
+	void renderLightingPanel(EngineSettings& settings);
+	void renderCameraPanel(GameObject& cameraObj, class CameraController* controller);
+
+	Device& vulkanDevice;
+	VkDescriptorPool imguiPool;
 };

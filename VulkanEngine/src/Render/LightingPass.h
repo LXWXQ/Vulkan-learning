@@ -29,6 +29,7 @@ private:
     Device& vulkanDevice;
     GBuffer& gBuffer;
     Swapchain& vulkanSwapchain;
+
     VkDescriptorSetLayout globalSetLayout;
 
     std::unique_ptr<LightingSystem> lightingSystem;

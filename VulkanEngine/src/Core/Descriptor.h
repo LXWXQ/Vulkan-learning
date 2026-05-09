@@ -7,7 +7,8 @@
 // 1. DescriptorAllocator (动态描述符池大管家)
 // 职责：自动管理 Pool 的创建和扩容。如果一个 Pool 满了，自动开一个新的。
 // =================================================================================
-class DescriptorAllocator {
+class DescriptorAllocator 
+{
 public:
     void init(VkDevice device);
     void cleanup();
@@ -32,7 +33,8 @@ private:
 // 2. DescriptorBuilder (描述符装配工/建造者模式)
 // 职责：提供清爽的链式 API，快速绑定 Buffer 和 Image。
 // =================================================================================
-class DescriptorBuilder {
+class DescriptorBuilder 
+{
 public:
     static DescriptorBuilder begin(DescriptorAllocator* allocator, VkDescriptorSetLayout layout);
 

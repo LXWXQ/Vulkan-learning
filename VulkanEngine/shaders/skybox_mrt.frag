@@ -7,7 +7,7 @@ layout(location = 0) out vec4 outPosition;
 layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec4 outPBR;
-layout(set = 0, binding = 5) uniform sampler2D environmentMap;
+layout(set = 0, binding = 1) uniform sampler2D environmentMap;
 const vec2 invAtan = vec2(0.1591, 0.3183);
 
 vec2 sampleSphericalMap(vec3 v) {

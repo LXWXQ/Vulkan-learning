@@ -11,11 +11,10 @@ layout(location = 1) out vec4 outNormal;   // 附件 2
 layout(location = 2) out vec4 outAlbedo;   // 附件 3
 layout(location = 3) out vec4 outPBR;      // 附件 4
 
-// 只保留材质贴图
-layout(set = 0, binding = 1) uniform sampler2D albedoMap;
-layout(set = 0, binding = 2) uniform sampler2D normalMap;
-layout(set = 0, binding = 3) uniform sampler2D metallicMap;
-layout(set = 0, binding = 4) uniform sampler2D roughnessMap;
+layout(set = 1, binding = 0) uniform sampler2D albedoMap;
+layout(set = 1, binding = 1) uniform sampler2D normalMap;
+layout(set = 1, binding = 2) uniform sampler2D metallicMap;
+layout(set = 1, binding = 3) uniform sampler2D roughnessMap;
 
 // 你的偏导数法线计算魔法保留在这里！
 vec3 getNormalFromMap() {
