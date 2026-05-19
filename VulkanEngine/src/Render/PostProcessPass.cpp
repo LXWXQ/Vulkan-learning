@@ -21,7 +21,6 @@ void PostProcessPass::init()
 
 void PostProcessPass::createRenderTarget() 
 {
-    // 1. 创建 VkImage
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -33,27 +32,15 @@ void PostProcessPass::createRenderTarget()
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    // 必须是 Color Attachment，且必须可以被当作 Sampler 读取！
     imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device.getDevice(), &imageInfo, nullptr, &outputImage.image) != VK_SUCCESS) {
-        throw std::runtime_error("PostProcessPass: 无法创建输出贴图 Image!");
-    }
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-    // 2. 分配显存
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device.getDevice(), outputImage.image, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = device.findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &outputImage.memory) != VK_SUCCESS) {
-        throw std::runtime_error("PostProcessPass: 无法分配输出贴图显存!");
-    }
-    vkBindImageMemory(device.getDevice(), outputImage.image, outputImage.memory, 0);
+    if (vmaCreateImage(device.getVmaAllocator(), &imageInfo, &allocInfo,
+        &outputImage.image, &outputImage.allocation, nullptr) != VK_SUCCESS)
+        throw std::runtime_error("PostProcessPass: image creation failed!");
 
     // 3. 创建 ImageView
     VkImageViewCreateInfo viewInfo{};
@@ -163,8 +150,7 @@ void PostProcessPass::destroyRenderTarget()
 {
     vkDestroySampler(device.getDevice(), outputSampler, nullptr);
     vkDestroyImageView(device.getDevice(), outputImage.view, nullptr);
-    vkDestroyImage(device.getDevice(), outputImage.image, nullptr);
-    vkFreeMemory(device.getDevice(), outputImage.memory, nullptr);
+    vmaDestroyImage(device.getVmaAllocator(), outputImage.image, outputImage.allocation);
 }
 
 void PostProcessPass::onResize(VkExtent2D extent) 

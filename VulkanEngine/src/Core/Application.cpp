@@ -61,8 +61,7 @@ FirstApp::FirstApp()
 
 FirstApp::~FirstApp()
 {
-	vkDestroyBuffer(vulkanDevice->getDevice(), globalUboBuffer, nullptr);
-	vkFreeMemory(vulkanDevice->getDevice(), globalUboBufferMemory, nullptr);
+	vmaDestroyBuffer(vulkanDevice->getVmaAllocator(), globalUboBuffer, globalUboAllocation);
 	descriptorManager->cleanup();
 	scene->cleanup();
 	glfwDestroyWindow(window);
@@ -84,25 +83,17 @@ void FirstApp::createUniformBuffers()
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = bufferSize;
 	bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	if (vkCreateBuffer(vulkanDevice->getDevice(), &bufferInfo, nullptr, &globalUboBuffer) != VK_SUCCESS)
-		throw std::runtime_error("UBO buffer creation failed!");
+	VmaAllocationCreateInfo allocInfo{};
+	allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-	VkMemoryRequirements memRequirements;
-	vkGetBufferMemoryRequirements(vulkanDevice->getDevice(), globalUboBuffer, &memRequirements);
+	vmaCreateBuffer(vulkanDevice->getVmaAllocator(), &bufferInfo, &allocInfo,
+		&globalUboBuffer, &globalUboAllocation, nullptr);
 
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memRequirements.size;
-	allocInfo.memoryTypeIndex = vulkanDevice->findMemoryType(memRequirements.memoryTypeBits,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-	if (vkAllocateMemory(vulkanDevice->getDevice(), &allocInfo, nullptr, &globalUboBufferMemory) != VK_SUCCESS)
-		throw std::runtime_error("UBO memory allocation failed!");
-
-	vkBindBufferMemory(vulkanDevice->getDevice(), globalUboBuffer, globalUboBufferMemory, 0);
-	vkMapMemory(vulkanDevice->getDevice(), globalUboBufferMemory, 0, bufferSize, 0, &uboMapped);
+	VmaAllocationInfo info;
+	vmaGetAllocationInfo(vulkanDevice->getVmaAllocator(), globalUboAllocation, &info);
+	uboMapped = info.pMappedData;
 }
 
 void FirstApp::loadAllPBRTextures()

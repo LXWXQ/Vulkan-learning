@@ -43,7 +43,7 @@ private:
 	RenderPipeline renderPipeline;
 
 	VkBuffer globalUboBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory globalUboBufferMemory = VK_NULL_HANDLE;
+	VmaAllocation globalUboAllocation = VK_NULL_HANDLE;
 	void* uboMapped = nullptr;
 
 	std::unique_ptr<Texture> environmentTex;

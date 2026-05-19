@@ -4,6 +4,9 @@
 #include <set>
 #include <cstring>
 
+#define VMA_IMPLEMENTATION
+#include <vk_mem_alloc.h>
+
 namespace 
 {
     VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) 
@@ -46,6 +49,7 @@ Device::Device(GLFWwindow* window) : window(window)
 
 Device::~Device() 
 {
+    vmaDestroyAllocator(vmaAllocator);
     vkDestroyDevice(device, nullptr);
 
     if (enableValidationLayers) 
@@ -192,6 +196,12 @@ void Device::createLogicalDevice()
 
     vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
     vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+
+    VmaAllocatorCreateInfo allocatorInfo{};
+    allocatorInfo.physicalDevice = physicalDevice;
+    allocatorInfo.device = device;
+    allocatorInfo.instance = instance;
+    vmaCreateAllocator(&allocatorInfo, &vmaAllocator);
 }
 
 bool Device::isDeviceSuitable(VkPhysicalDevice device) 

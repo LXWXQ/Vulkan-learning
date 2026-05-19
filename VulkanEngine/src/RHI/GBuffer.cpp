@@ -58,28 +58,15 @@ void GBuffer::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBu
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    // 注意这里：融合了 usage、采样位和输入附件位
     imageInfo.usage = usage | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device.getDevice(), &imageInfo, nullptr, &attachment->image) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("[致命错误] G-Buffer 附件 VkImage 创建失败！");
-    }
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device.getDevice(), attachment->image, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = device.findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &attachment->memory) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("[致命错误] G-Buffer 附件显存分配失败！");
-    }
-    vkBindImageMemory(device.getDevice(), attachment->image, attachment->memory, 0);
+    if (vmaCreateImage(device.getVmaAllocator(), &imageInfo, &allocInfo,
+        &attachment->image, &attachment->allocation, nullptr) != VK_SUCCESS)
+        throw std::runtime_error("[致命错误] G-Buffer 附件创建失败！");
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -92,15 +79,12 @@ void GBuffer::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBu
     viewInfo.subresourceRange.layerCount = 1;
     viewInfo.image = attachment->image;
 
-    if (vkCreateImageView(device.getDevice(), &viewInfo, nullptr, &attachment->view) != VK_SUCCESS) 
-    {
+    if (vkCreateImageView(device.getDevice(), &viewInfo, nullptr, &attachment->view) != VK_SUCCESS)
         throw std::runtime_error("[致命错误] G-Buffer ImageView 创建失败！");
-    }
 }
 
 void GBuffer::destroyAttachment(FrameBufferAttachment& attachment) 
 {
     if (attachment.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), attachment.view, nullptr);
-    if (attachment.image != VK_NULL_HANDLE) vkDestroyImage(device.getDevice(), attachment.image, nullptr);
-    if (attachment.memory != VK_NULL_HANDLE) vkFreeMemory(device.getDevice(), attachment.memory, nullptr);
+    if (attachment.image != VK_NULL_HANDLE) vmaDestroyImage(device.getVmaAllocator(), attachment.image, attachment.allocation);
 }

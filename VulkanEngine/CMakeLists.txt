@@ -14,6 +14,7 @@ find_package(Vulkan REQUIRED)
 set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glfw")
 set(GLM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glm")
 set(TINYOBJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinyobjloader")
+set(VMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/VulkanMemoryAllocator")
 set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/stb")
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/imgui")
 
@@ -44,6 +45,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${STB_DIR}"
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
+    "${VMA_DIR}"
     "src"
 )
 

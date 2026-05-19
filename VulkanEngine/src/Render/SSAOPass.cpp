@@ -16,13 +16,11 @@ SSAOPass::~SSAOPass()
 	vkDestroyPipelineLayout(device.getDevice(), pipelineLayout, nullptr);
 	vkDestroyDescriptorSetLayout(device.getDevice(), localSetLayout, nullptr);
 
-	vkDestroyBuffer(device.getDevice(), uboBuffer, nullptr);
-	vkFreeMemory(device.getDevice(), uboMemory, nullptr);
+	vmaDestroyBuffer(device.getVmaAllocator(), uboBuffer, uboAllocation);
 
 	vkDestroySampler(device.getDevice(), noiseTexture.sampler, nullptr);
 	vkDestroyImageView(device.getDevice(), noiseTexture.view, nullptr);
-	vkDestroyImage(device.getDevice(), noiseTexture.image, nullptr);
-	vkFreeMemory(device.getDevice(), noiseTexture.memory, nullptr);
+	vmaDestroyImage(device.getVmaAllocator(), noiseTexture.image, noiseTexture.allocation);
 }
 
 void SSAOPass::init()
@@ -72,29 +70,23 @@ void SSAOPass::createNoiseTexture()
 	VkDeviceSize imageSize = ssaoNoise.size() * sizeof(glm::vec4);
 
 	VkBuffer stagingBuffer;
-	VkDeviceMemory stagingBufferMemory;
+	VmaAllocation stagingAllocation;
 
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = imageSize;
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	vkCreateBuffer(device.getDevice(), &bufferInfo, nullptr, &stagingBuffer);
 
-	VkMemoryRequirements memReqs;
-	vkGetBufferMemoryRequirements(device.getDevice(), stagingBuffer, &memReqs);
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = device.findMemoryType(memReqs.memoryTypeBits,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &stagingBufferMemory);
-	vkBindBufferMemory(device.getDevice(), stagingBuffer, stagingBufferMemory, 0);
+	VmaAllocationCreateInfo stagingAllocInfo{};
+	stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+	vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &stagingAllocInfo,
+		&stagingBuffer, &stagingAllocation, nullptr);
 
-	void* data;
-	vkMapMemory(device.getDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
-	memcpy(data, ssaoNoise.data(), (size_t)imageSize);
-	vkUnmapMemory(device.getDevice(), stagingBufferMemory);
+	void* mapped;
+	vmaMapMemory(device.getVmaAllocator(), stagingAllocation, &mapped);
+	memcpy(mapped, ssaoNoise.data(), (size_t)imageSize);
+	vmaUnmapMemory(device.getVmaAllocator(), stagingAllocation);
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -109,13 +101,11 @@ void SSAOPass::createNoiseTexture()
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	vkCreateImage(device.getDevice(), &imageInfo, nullptr, &noiseTexture.image);
 
-	vkGetImageMemoryRequirements(device.getDevice(), noiseTexture.image, &memReqs);
-	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = device.findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &noiseTexture.memory);
-	vkBindImageMemory(device.getDevice(), noiseTexture.image, noiseTexture.memory, 0);
+	VmaAllocationCreateInfo imageAllocInfo{};
+	imageAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	vmaCreateImage(device.getVmaAllocator(), &imageInfo, &imageAllocInfo,
+		&noiseTexture.image, &noiseTexture.allocation, nullptr);
 
 	VkCommandBufferAllocateInfo allocCmdInfo{};
 	allocCmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -171,8 +161,7 @@ void SSAOPass::createNoiseTexture()
 	vkQueueWaitIdle(device.getGraphicsQueue());
 	vkFreeCommandBuffers(device.getDevice(), commandPool, 1, &cmdBuffer);
 
-	vkDestroyBuffer(device.getDevice(), stagingBuffer, nullptr);
-	vkFreeMemory(device.getDevice(), stagingBufferMemory, nullptr);
+	vmaDestroyBuffer(device.getVmaAllocator(), stagingBuffer, stagingAllocation);
 
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -204,20 +193,17 @@ void SSAOPass::createUniformBuffer()
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = bufferSize;
 	bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	vkCreateBuffer(device.getDevice(), &bufferInfo, nullptr, &uboBuffer);
 
-	VkMemoryRequirements memReqs;
-	vkGetBufferMemoryRequirements(device.getDevice(), uboBuffer, &memReqs);
+	VmaAllocationCreateInfo allocInfo{};
+	allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = device.findMemoryType(memReqs.memoryTypeBits,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &uboMemory);
-	vkBindBufferMemory(device.getDevice(), uboBuffer, uboMemory, 0);
-	vkMapMemory(device.getDevice(), uboMemory, 0, bufferSize, 0, &uboMapped);
+	vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
+		&uboBuffer, &uboAllocation, nullptr);
+
+	VmaAllocationInfo info;
+	vmaGetAllocationInfo(device.getVmaAllocator(), uboAllocation, &info);
+	uboMapped = info.pMappedData;
 }
 
 void SSAOPass::createLocalDescriptors()

@@ -2,6 +2,7 @@
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
+#include <vk_mem_alloc.h>
 #include <vector>
 #include <optional>
 #include <string>
@@ -30,8 +31,9 @@ public:
     VkPhysicalDevice getPhysicalDevice() { return physicalDevice; }
     VkSurfaceKHR getSurface() { return surface; }
     VkQueue getGraphicsQueue() { return graphicsQueue; }
-    VkQueue getPresentQueue() { return presentQueue; }
-    VkInstance getInstance() { return instance; }
+	VkQueue getPresentQueue() { return presentQueue; }
+	VkInstance getInstance() { return instance; }
+	VmaAllocator getVmaAllocator() { return vmaAllocator; }
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
     VkFormat findDepthFormat();
     QueueFamilyIndices findPhysicalQueueFamilies() { return findQueueFamilies(physicalDevice); }
@@ -61,10 +63,11 @@ private:
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
     VkSurfaceKHR surface;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkDevice device;
-    VkQueue graphicsQueue;
-    VkQueue presentQueue;
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	VkDevice device;
+	VkQueue graphicsQueue;
+	VkQueue presentQueue;
+	VmaAllocator vmaAllocator;
 
     const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
     const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };

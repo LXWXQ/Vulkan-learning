@@ -25,15 +25,14 @@ Texture::~Texture()
 {
 	if (sampler != VK_NULL_HANDLE) vkDestroySampler(vulkanDevice.getDevice(), sampler, nullptr);
 	if (view != VK_NULL_HANDLE) vkDestroyImageView(vulkanDevice.getDevice(), view, nullptr);
-	if (image != VK_NULL_HANDLE) vkDestroyImage(vulkanDevice.getDevice(), image, nullptr);
-	if (memory != VK_NULL_HANDLE) vkFreeMemory(vulkanDevice.getDevice(), memory, nullptr);
+	if (image != VK_NULL_HANDLE) vmaDestroyImage(vulkanDevice.getVmaAllocator(), image, allocation);
 }
 
 Texture::Texture(Texture&& other) noexcept
-	: vulkanDevice(other.vulkanDevice), image(other.image), memory(other.memory), view(other.view), sampler(other.sampler)
+	: vulkanDevice(other.vulkanDevice), image(other.image), allocation(other.allocation), view(other.view), sampler(other.sampler)
 {
 	other.image = VK_NULL_HANDLE;
-	other.memory = VK_NULL_HANDLE;
+	other.allocation = VK_NULL_HANDLE;
 	other.view = VK_NULL_HANDLE;
 	other.sampler = VK_NULL_HANDLE;
 }
@@ -44,16 +43,15 @@ Texture& Texture::operator=(Texture&& other) noexcept
 	{
 		if (sampler) vkDestroySampler(vulkanDevice.getDevice(), sampler, nullptr);
 		if (view) vkDestroyImageView(vulkanDevice.getDevice(), view, nullptr);
-		if (image) vkDestroyImage(vulkanDevice.getDevice(), image, nullptr);
-		if (memory) vkFreeMemory(vulkanDevice.getDevice(), memory, nullptr);
+		if (image) vmaDestroyImage(vulkanDevice.getVmaAllocator(), image, allocation);
 
 		image = other.image;
-		memory = other.memory;
+		allocation = other.allocation;
 		view = other.view;
 		sampler = other.sampler;
 
 		other.image = VK_NULL_HANDLE;
-		other.memory = VK_NULL_HANDLE;
+		other.allocation = VK_NULL_HANDLE;
 		other.view = VK_NULL_HANDLE;
 		other.sampler = VK_NULL_HANDLE;
 	}
@@ -99,30 +97,23 @@ void Texture::createFromPixels(const void* pixels, uint32_t width, uint32_t heig
 	VkDeviceSize imageSize = width * height * 4 * pixelSize;
 
 	VkBuffer stagingBuffer;
-	VkDeviceMemory stagingBufferMemory;
+	VmaAllocation stagingAllocation;
 
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = imageSize;
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	vkCreateBuffer(vulkanDevice.getDevice(), &bufferInfo, nullptr, &stagingBuffer);
 
-	VkMemoryRequirements memRequirements;
-	vkGetBufferMemoryRequirements(vulkanDevice.getDevice(), stagingBuffer, &memRequirements);
-
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memRequirements.size;
-	allocInfo.memoryTypeIndex = vulkanDevice.findMemoryType(memRequirements.memoryTypeBits,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-	vkAllocateMemory(vulkanDevice.getDevice(), &allocInfo, nullptr, &stagingBufferMemory);
-	vkBindBufferMemory(vulkanDevice.getDevice(), stagingBuffer, stagingBufferMemory, 0);
+	VmaAllocationCreateInfo stagingAllocInfo{};
+	stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+	vmaCreateBuffer(vulkanDevice.getVmaAllocator(), &bufferInfo, &stagingAllocInfo,
+		&stagingBuffer, &stagingAllocation, nullptr);
 
 	void* data;
-	vkMapMemory(vulkanDevice.getDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
+	vmaMapMemory(vulkanDevice.getVmaAllocator(), stagingAllocation, &data);
 	memcpy(data, pixels, static_cast<size_t>(imageSize));
-	vkUnmapMemory(vulkanDevice.getDevice(), stagingBufferMemory);
+	vmaUnmapMemory(vulkanDevice.getVmaAllocator(), stagingAllocation);
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -137,15 +128,11 @@ void Texture::createFromPixels(const void* pixels, uint32_t width, uint32_t heig
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	vkCreateImage(vulkanDevice.getDevice(), &imageInfo, nullptr, &this->image);
 
-	vkGetImageMemoryRequirements(vulkanDevice.getDevice(), this->image, &memRequirements);
-	allocInfo.allocationSize = memRequirements.size;
-	allocInfo.memoryTypeIndex = vulkanDevice.findMemoryType(memRequirements.memoryTypeBits,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	vkAllocateMemory(vulkanDevice.getDevice(), &allocInfo, nullptr, &this->memory);
-	vkBindImageMemory(vulkanDevice.getDevice(), this->image, this->memory, 0);
+	VmaAllocationCreateInfo imageAllocInfo{};
+	imageAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	vmaCreateImage(vulkanDevice.getVmaAllocator(), &imageInfo, &imageAllocInfo,
+		&this->image, &this->allocation, nullptr);
 
 	VkCommandBufferAllocateInfo allocInfoCmd{};
 	allocInfoCmd.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -178,14 +165,8 @@ void Texture::createFromPixels(const void* pixels, uint32_t width, uint32_t heig
 		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
 	VkBufferImageCopy region{};
-	region.bufferOffset = 0;
-	region.bufferRowLength = 0;
-	region.bufferImageHeight = 0;
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.imageSubresource.mipLevel = 0;
-	region.imageSubresource.baseArrayLayer = 0;
 	region.imageSubresource.layerCount = 1;
-	region.imageOffset = { 0, 0, 0 };
 	region.imageExtent = { width, height, 1 };
 	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, this->image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -207,8 +188,7 @@ void Texture::createFromPixels(const void* pixels, uint32_t width, uint32_t heig
 	vkQueueWaitIdle(vulkanDevice.getGraphicsQueue());
 	vkFreeCommandBuffers(vulkanDevice.getDevice(), commandPool, 1, &commandBuffer);
 
-	vkDestroyBuffer(vulkanDevice.getDevice(), stagingBuffer, nullptr);
-	vkFreeMemory(vulkanDevice.getDevice(), stagingBufferMemory, nullptr);
+	vmaDestroyBuffer(vulkanDevice.getVmaAllocator(), stagingBuffer, stagingAllocation);
 
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;

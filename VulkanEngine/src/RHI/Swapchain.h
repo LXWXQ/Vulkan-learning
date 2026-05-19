@@ -41,6 +41,6 @@ class Swapchain
 
         VkFormat depthFormat;
         VkImage depthImage;
-        VkDeviceMemory depthImageMemory;
+        VmaAllocation depthImageAllocation;
         VkImageView depthImageView;
 };

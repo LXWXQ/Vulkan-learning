@@ -22,13 +22,11 @@ Model::Model(Device& device, const Model::Builder& builder) : device(device)
 
 Model::~Model() 
 {
-    vkDestroyBuffer(device.getDevice(), vertexBuffer, nullptr);
-    vkFreeMemory(device.getDevice(), vertexBufferMemory, nullptr);
+    vmaDestroyBuffer(device.getVmaAllocator(), vertexBuffer, vertexAllocation);
 
     if (hasIndexBuffer) 
     {
-        vkDestroyBuffer(device.getDevice(), indexBuffer, nullptr);
-        vkFreeMemory(device.getDevice(), indexBufferMemory, nullptr);
+        vmaDestroyBuffer(device.getVmaAllocator(), indexBuffer, indexAllocation);
     }
 }
 
@@ -41,32 +39,19 @@ void Model::createVertexBuffers(const std::vector<Vertex>& vertices)
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = bufferSize;
     bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(device.getDevice(), &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) 
-    {
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    if (vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
+        &vertexBuffer, &vertexAllocation, nullptr) != VK_SUCCESS)
         throw std::runtime_error("failed to create vertex buffer!");
-    }
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device.getDevice(), vertexBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = device.findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    if (vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("failed to allocate vertex buffer memory!");
-    }
-
-    vkBindBufferMemory(device.getDevice(), vertexBuffer, vertexBufferMemory, 0);
 
     void* data;
-    vkMapMemory(device.getDevice(), vertexBufferMemory, 0, bufferSize, 0, &data); 
-    memcpy(data, vertices.data(), (size_t)bufferSize);                           
-    vkUnmapMemory(device.getDevice(), vertexBufferMemory);                       
+    vmaMapMemory(device.getVmaAllocator(), vertexAllocation, &data);
+    memcpy(data, vertices.data(), (size_t)bufferSize);
+    vmaUnmapMemory(device.getVmaAllocator(), vertexAllocation);
 }
 
 void Model::bind(VkCommandBuffer commandBuffer) 
@@ -104,33 +89,20 @@ void Model::createIndexBuffers(const std::vector<uint32_t>& indices)
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = bufferSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT; 
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 
-    if (vkCreateBuffer(device.getDevice(), &bufferInfo, nullptr, &indexBuffer) != VK_SUCCESS) 
-    {
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    if (vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
+        &indexBuffer, &indexAllocation, nullptr) != VK_SUCCESS)
         throw std::runtime_error("failed to create index buffer!");
-    }
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device.getDevice(), indexBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = device.findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    if (vkAllocateMemory(device.getDevice(), &allocInfo, nullptr, &indexBufferMemory) != VK_SUCCESS) 
-    {
-        throw std::runtime_error("failed to allocate index buffer memory!");
-    }
-
-    vkBindBufferMemory(device.getDevice(), indexBuffer, indexBufferMemory, 0);
 
     void* data;
-    vkMapMemory(device.getDevice(), indexBufferMemory, 0, bufferSize, 0, &data);
+    vmaMapMemory(device.getVmaAllocator(), indexAllocation, &data);
     memcpy(data, indices.data(), (size_t)bufferSize);
-    vkUnmapMemory(device.getDevice(), indexBufferMemory);
+    vmaUnmapMemory(device.getVmaAllocator(), indexAllocation);
 }
 
 std::unique_ptr<Model> Model::createModelFromFile(Device& device, const std::string& filepath) 

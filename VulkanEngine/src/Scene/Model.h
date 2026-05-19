@@ -103,11 +103,11 @@ private:
 
     Device& device;
     VkBuffer vertexBuffer;
-    VkDeviceMemory vertexBufferMemory;
+    VmaAllocation vertexAllocation;
     uint32_t vertexCount;
 
     bool hasIndexBuffer = false;
     VkBuffer indexBuffer;
-    VkDeviceMemory indexBufferMemory;
+    VmaAllocation indexAllocation;
     uint32_t indexCount;
 };

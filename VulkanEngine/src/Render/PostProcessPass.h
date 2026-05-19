@@ -35,7 +35,7 @@ protected:
     // 输出的贴图资源 (子类算完的结果存这里)
     struct RenderTarget {
         VkImage image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
     } outputImage;
     VkSampler outputSampler = VK_NULL_HANDLE;
