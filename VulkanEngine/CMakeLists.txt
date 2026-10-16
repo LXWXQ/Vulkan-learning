@@ -17,6 +17,9 @@ set(TINYOBJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinyobjloader")
 set(VMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/VulkanMemoryAllocator")
 set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/stb")
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/imgui")
+set(TINYGLTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinygltf")
+set(ENTT_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/entt")
+set(SPDLOG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/spdlog")
 
 find_package(glfw3 REQUIRED)
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
@@ -42,6 +45,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${GLM_INCLUDE_DIR}
     "${GLFW_DIR}/include"
     "${TINYOBJ_DIR}"
+    "${TINYGLTF_DIR}"
+    "${ENTT_DIR}"
+    "${SPDLOG_DIR}"
     "${STB_DIR}"
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
@@ -49,7 +55,54 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "src"
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE 
+# ---------------------------------------------------------------------------
+# 资源路径注入：在配置阶段把绝对路径写进生成的 AssetPaths.h，
+# 让引擎不再依赖"工作目录恰好是 build/Debug"这个隐式约定。
+# ---------------------------------------------------------------------------
+set(SENTINEL_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${SENTINEL_GENERATED_DIR}")
+
+# W1：配置文件也放在工程根下的 config/ 目录，理由和资源路径一样 ——
+# 不能依赖工作目录。放工程根（而不是 build/）是为了让 Debug / Release
+# 共享同一份用户设置，而且这份文件是要进版本库的（作为默认预设）。
+set(SENTINEL_CONFIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/config")
+file(MAKE_DIRECTORY "${SENTINEL_CONFIG_DIR}")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AssetPaths.h.in"
+    "${SENTINEL_GENERATED_DIR}/AssetPaths.h"
+    @ONLY
+)
+target_include_directories(${PROJECT_NAME} PRIVATE "${SENTINEL_GENERATED_DIR}")
+
+# tinygltf 内部默认会展开一份 stb_image 实现；
+# 而 Application.cpp 里已经定义了 STB_IMAGE_IMPLEMENTATION，两者会重复定义 stbi_* 符号。
+# 因此关闭它自带的图片解码，改由我们注册自定义解码器（见 GLTFLoader.cpp）。
+# 这两个宏必须对所有包含 tiny_gltf.h 的翻译单元一致，所以放在这里统一注入。
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    TINYGLTF_NO_STB_IMAGE
+    TINYGLTF_NO_STB_IMAGE_WRITE
+)
+
+# ---------------------------------------------------------------------------
+# VMA 泄漏排查开关。
+#
+# 打开之后：
+#   1) VMA 在销毁分配器时把每条未释放的分配逐条打出来
+#      （默认只有一句断言，不说是谁）；
+#   2) sentinel_vmaNameFlag() 会给分配附上名字，于是日志里直接显示
+#      "Name: SSAOUbo" 而不是 "Name: vma_empty"。
+#
+# 默认关：它会记录每次分配的调用点字符串，Debug 下明显变慢，而且它报告的
+# 内容本身就意味着"代码有 bug"，不该是常态。
+#   cmake -S . -B build -DSENTINEL_VMA_LEAK_CHECK=ON
+# ---------------------------------------------------------------------------
+option(SENTINEL_VMA_LEAK_CHECK "打开 VMA 的详细泄漏日志（排查用，会变慢）" OFF)
+if(SENTINEL_VMA_LEAK_CHECK)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_VMA_LEAK_CHECK)
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
     Vulkan::Vulkan 
     glfw
 )
@@ -60,8 +113,7 @@ set(OUTPUT_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 
 file(MAKE_DIRECTORY ${OUTPUT_SHADER_DIR})
 
-file(GLOB SHADER_FILES "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag")
-file(GLOB SHADER_FILES CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag")
+file(GLOB SHADER_FILES CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag" "${SHADER_DIR}/*.comp")
 foreach(SHADER_FILE ${SHADER_FILES})
   
     get_filename_component(FILE_NAME ${SHADER_FILE} NAME)

@@ -4,27 +4,31 @@
 #include "Core/FrameInfo.h"
 #include <memory>
 
+// 几何渲染逻辑：持有 3 条管线（标准物体 / 天空盒 / 网格）。
+// D-1(b) 起管线按「附件格式」创建（动态渲染），不再需要 VkRenderPass。
 class GeometrySystem
 {
 public:
-	GeometrySystem(Device& device, VkRenderPass renderPass,
-		VkDescriptorSetLayout globalSetLayout,
-		VkDescriptorSetLayout materialSetLayout);
-	~GeometrySystem();
+    GeometrySystem(Device& device, VkFormat depthFormat,
+                   VkDescriptorSetLayout globalSetLayout,
+                   VkDescriptorSetLayout materialSetLayout);
+    ~GeometrySystem();
 
-	GeometrySystem(const GeometrySystem&) = delete;
-	GeometrySystem& operator=(const GeometrySystem&) = delete;
+    GeometrySystem(const GeometrySystem&) = delete;
+    GeometrySystem& operator=(const GeometrySystem&) = delete;
 
-	void render(FrameInfo& frameInfo);
-	VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }
+    void render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo);
+    VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }
 
 private:
-	void createPipelineLayout(VkDescriptorSetLayout globalSetLayout, VkDescriptorSetLayout materialSetLayout);
-	void createPipelines(VkRenderPass renderPass);
+    void createPipelineLayout(VkDescriptorSetLayout globalSetLayout,
+                              VkDescriptorSetLayout materialSetLayout);
+    void createPipelines();
 
-	Device& vulkanDevice;
-	VkPipelineLayout pipelineLayout;
-	std::unique_ptr<Pipeline> geometryPipeline;
-	std::unique_ptr<Pipeline> skyboxPipeline;
-	std::unique_ptr<Pipeline> gridPipeline;
+    Device& vulkanDevice;
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    std::unique_ptr<Pipeline> geometryPipeline;
+    std::unique_ptr<Pipeline> skyboxPipeline;
+    std::unique_ptr<Pipeline> gridPipeline;
 };

@@ -6,10 +6,10 @@ GBuffer::GBuffer(Device& device, VkExtent2D extent)
 {
     std::cout << "[Sentinel 通报] 开始在显存中开辟 G-Buffer 防区...\n";
 
-    createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &position);
-    createAttachment(VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &normal);
-    createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &albedo);
-    createAttachment(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &pbr);
+    createAttachment(GBufferFormat::Position, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &position);
+    createAttachment(GBufferFormat::Normal,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &normal);
+    createAttachment(GBufferFormat::Albedo,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &albedo);
+    createAttachment(GBufferFormat::Pbr,      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &pbr);
     createAttachment(device.findDepthFormat(), VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth);
 
     // 创建 G-Buffer 专属采样器

@@ -1,310 +1,321 @@
 #include "Render/SSAOPass.h"
+#include "RHI/CommandUtils.h"
+#include "AssetPaths.h"
+
 #include <random>
 #include <stdexcept>
 #include <cstring>
+#include <cstdlib>     // std::getenv（反面用例：SENTINEL_SIMULATE_SSAO_SKIP）
 #include <array>
 
-SSAOPass::SSAOPass(Device& device, VkExtent2D extent, VkCommandPool commandPool,
-	VkDescriptorSetLayout globalLayout, DescriptorManager* descMgr)
-	: PostProcessPass(device, extent, VK_FORMAT_R8_UNORM),
-	commandPool(commandPool), globalSetLayout(globalLayout), descriptorManager(descMgr)
+SSAOPass::SSAOPass(Device& device, RenderGraph& graph, RenderResources& resources,
+                   VkDescriptorSetLayout globalLayout, DescriptorManager* descMgr)
+    : device(device), renderGraph(graph), resources(resources),
+      descriptorManager(descMgr), globalSetLayout(globalLayout)
 {
 }
 
 SSAOPass::~SSAOPass()
 {
-	vkDestroyPipelineLayout(device.getDevice(), pipelineLayout, nullptr);
-	vkDestroyDescriptorSetLayout(device.getDevice(), localSetLayout, nullptr);
+    if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device.getDevice(), pipelineLayout, nullptr);
+    if (localSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device.getDevice(), localSetLayout, nullptr);
 
-	vmaDestroyBuffer(device.getVmaAllocator(), uboBuffer, uboAllocation);
+    if (uboBuffer != VK_NULL_HANDLE) vmaDestroyBuffer(device.getVmaAllocator(), uboBuffer, uboAllocation);
 
-	vkDestroySampler(device.getDevice(), noiseTexture.sampler, nullptr);
-	vkDestroyImageView(device.getDevice(), noiseTexture.view, nullptr);
-	vmaDestroyImage(device.getVmaAllocator(), noiseTexture.image, noiseTexture.allocation);
+    if (noiseTexture.sampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), noiseTexture.sampler, nullptr);
+    if (noiseTexture.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), noiseTexture.view, nullptr);
+    if (noiseTexture.image != VK_NULL_HANDLE) vmaDestroyImage(device.getVmaAllocator(), noiseTexture.image, noiseTexture.allocation);
+
+    if (outputSampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), outputSampler, nullptr);
+}
+
+VkImageView SSAOPass::getOutputImageView() const
+{
+    return renderGraph.getView(resources.ssao);
 }
 
 void SSAOPass::init()
 {
-	PostProcessPass::init();
+    // 输出目标交给渲染图创建 —— 它会被光照通道采样，渲染图据此自动插屏障
+    RenderGraph::TextureDesc desc;
+    desc.name = "SSAO";
+    desc.format = VK_FORMAT_R8_UNORM;
+    desc.extent = { WIDTH, HEIGHT };
+    desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    resources.ssao = renderGraph.createTexture(desc);
 
-	generateSampleKernel();
-	createNoiseTexture();
-	createUniformBuffer();
-	createLocalDescriptors();
-	createPipeline();
+    // 采样器要自己建：渲染图只管图像，不管采样器
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = VK_FILTER_LINEAR;
+    si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxAnisotropy = 1.0f;
+    if (vkCreateSampler(device.getDevice(), &si, nullptr, &outputSampler) != VK_SUCCESS)
+        throw std::runtime_error("SSAOPass: 输出采样器创建失败");
+
+    generateSampleKernel();
+    createNoiseTexture();
+    createUniformBuffer();
+    createLocalDescriptors();
+    createPipeline();
 }
 
 void SSAOPass::generateSampleKernel()
 {
-	std::uniform_real_distribution<float> randomFloats(0.0f, 1.0f);
-	std::default_random_engine generator;
+    std::uniform_real_distribution<float> randomFloats(0.0f, 1.0f);
+    std::default_random_engine generator;
 
-	for (int i = 0; i < 16; ++i)
-	{
-		glm::vec3 sample(
-			randomFloats(generator) * 2.0f - 1.0f,
-			randomFloats(generator) * 2.0f - 1.0f,
-			randomFloats(generator)
-		);
-		sample = glm::normalize(sample);
-		sample *= randomFloats(generator);
+    ssaoKernel.clear();
+    for (int i = 0; i < 64; ++i)
+    {
+        glm::vec3 sample(
+            randomFloats(generator) * 2.0f - 1.0f,
+            randomFloats(generator) * 2.0f - 1.0f,
+            randomFloats(generator));
+        sample = glm::normalize(sample);
+        sample *= randomFloats(generator);
 
-		float scale = float(i) / 16.0f;
-		scale = glm::mix(0.1f, 1.0f, scale * scale);
-		sample *= scale;
+        // 靠近中心的样本更密集
+        float scale = static_cast<float>(i) / 64.0f;
+        scale = glm::mix(0.1f, 1.0f, scale * scale);
+        sample *= scale;
 
-		ssaoKernel.push_back(glm::vec4(sample, 0.0f));
-	}
+        ssaoKernel.push_back(glm::vec4(sample, 0.0f));
+    }
 }
 
 void SSAOPass::createNoiseTexture()
 {
-	std::uniform_real_distribution<float> randomFloats(0.0f, 1.0f);
-	std::default_random_engine generator;
-	std::vector<glm::vec4> ssaoNoise;
+    std::uniform_real_distribution<float> randomFloats(0.0f, 1.0f);
+    std::default_random_engine generator;
+    std::vector<glm::vec4> ssaoNoise;
+    for (int i = 0; i < 16; i++)
+        ssaoNoise.push_back(glm::vec4(randomFloats(generator) * 2.0f - 1.0f,
+                                      randomFloats(generator) * 2.0f - 1.0f, 0.0f, 1.0f));
 
-	for (int i = 0; i < 16; i++)
-		ssaoNoise.push_back(glm::vec4(randomFloats(generator) * 2.0f - 1.0f,
-			randomFloats(generator) * 2.0f - 1.0f, 0.0f, 1.0f));
+    VkDeviceSize imageSize = ssaoNoise.size() * sizeof(glm::vec4);
 
-	VkDeviceSize imageSize = ssaoNoise.size() * sizeof(glm::vec4);
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = imageSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &stagingAllocInfo, &stagingBuffer, &stagingAllocation, nullptr);
+    vmaCopyMemoryToAllocation(device.getVmaAllocator(), ssaoNoise.data(), stagingAllocation, 0, imageSize);
 
-	VkBuffer stagingBuffer;
-	VmaAllocation stagingAllocation;
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = { 4, 4, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    VmaAllocationCreateInfo imageAllocInfo{};
+    imageAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    vmaCreateImage(device.getVmaAllocator(), &imageInfo, &imageAllocInfo,
+                   &noiseTexture.image, &noiseTexture.allocation, nullptr);
 
-	VkBufferCreateInfo bufferInfo{};
-	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = imageSize;
-	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
-	VmaAllocationCreateInfo stagingAllocInfo{};
-	stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-	stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-	vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &stagingAllocInfo,
-		&stagingBuffer, &stagingAllocation, nullptr);
+    // 用一次性命令缓冲做拷贝 + 布局转换
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    {
+        // 复用设备上已有一个通用命令池：这里临时新建一个专用池，避免和渲染用的池耦合
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = device.findPhysicalQueueFamilies().graphicsFamily.value();
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        vkCreateCommandPool(device.getDevice(), &poolInfo, nullptr, &cmdPool);
+    }
 
-	void* mapped;
-	vmaMapMemory(device.getVmaAllocator(), stagingAllocation, &mapped);
-	memcpy(mapped, ssaoNoise.data(), (size_t)imageSize);
-	vmaUnmapMemory(device.getVmaAllocator(), stagingAllocation);
+    VkCommandBuffer c = cmdBeginSingleTime(device.getDevice(), cmdPool);
 
-	VkImageCreateInfo imageInfo{};
-	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.extent.width = 4;
-	imageInfo.extent.height = 4;
-	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = 1;
-	imageInfo.arrayLayers = 1;
-	imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = noiseTexture.image;
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-	VmaAllocationCreateInfo imageAllocInfo{};
-	imageAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-	vmaCreateImage(device.getVmaAllocator(), &imageInfo, &imageAllocInfo,
-		&noiseTexture.image, &noiseTexture.allocation, nullptr);
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = { 4, 4, 1 };
+    vkCmdCopyBufferToImage(c, stagingBuffer, noiseTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	VkCommandBufferAllocateInfo allocCmdInfo{};
-	allocCmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocCmdInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocCmdInfo.commandPool = commandPool;
-	allocCmdInfo.commandBufferCount = 1;
-	VkCommandBuffer cmdBuffer;
-	vkAllocateCommandBuffers(device.getDevice(), &allocCmdInfo, &cmdBuffer);
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-	VkCommandBufferBeginInfo beginInfo{};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    cmdEndSingleTime(device.getDevice(), device.getGraphicsQueue(), cmdPool, c);
+    vkDestroyCommandPool(device.getDevice(), cmdPool, nullptr);
 
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = noiseTexture.image;
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 1;
-	barrier.srcAccessMask = 0;
-	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    vmaDestroyBuffer(device.getVmaAllocator(), stagingBuffer, stagingAllocation);
 
-	VkBufferImageCopy region{};
-	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.imageSubresource.layerCount = 1;
-	region.imageExtent = { 4, 4, 1 };
-	vkCmdCopyBufferToImage(cmdBuffer, stagingBuffer, noiseTexture.image,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = noiseTexture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(device.getDevice(), &viewInfo, nullptr, &noiseTexture.view);
 
-	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-	vkEndCommandBuffer(cmdBuffer);
-
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuffer;
-	vkQueueSubmit(device.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
-	vkQueueWaitIdle(device.getGraphicsQueue());
-	vkFreeCommandBuffers(device.getDevice(), commandPool, 1, &cmdBuffer);
-
-	vmaDestroyBuffer(device.getVmaAllocator(), stagingBuffer, stagingAllocation);
-
-	VkImageViewCreateInfo viewInfo{};
-	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	viewInfo.image = noiseTexture.image;
-	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	viewInfo.subresourceRange.baseMipLevel = 0;
-	viewInfo.subresourceRange.levelCount = 1;
-	viewInfo.subresourceRange.baseArrayLayer = 0;
-	viewInfo.subresourceRange.layerCount = 1;
-	vkCreateImageView(device.getDevice(), &viewInfo, nullptr, &noiseTexture.view);
-
-	VkSamplerCreateInfo samplerInfo{};
-	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samplerInfo.magFilter = VK_FILTER_NEAREST;
-	samplerInfo.minFilter = VK_FILTER_NEAREST;
-	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	vkCreateSampler(device.getDevice(), &samplerInfo, nullptr, &noiseTexture.sampler);
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    vkCreateSampler(device.getDevice(), &samplerInfo, nullptr, &noiseTexture.sampler);
 }
 
 void SSAOPass::createUniformBuffer()
 {
-	VkDeviceSize bufferSize = sizeof(SSAOUbo);
-	VkBufferCreateInfo bufferInfo{};
-	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = bufferSize;
-	bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VkDeviceSize bufferSize = sizeof(SSAOUbo);
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocInfo.flags |= sentinel_vmaNameFlag();
+    allocInfo.pUserData = const_cast<char*>("SSAOUbo");
+    vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo, &uboBuffer, &uboAllocation, nullptr);
 
-	VmaAllocationCreateInfo allocInfo{};
-	allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-	allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-	vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
-		&uboBuffer, &uboAllocation, nullptr);
-
-	VmaAllocationInfo info;
-	vmaGetAllocationInfo(device.getVmaAllocator(), uboAllocation, &info);
-	uboMapped = info.pMappedData;
+    VmaAllocationInfo info;
+    vmaGetAllocationInfo(device.getVmaAllocator(), uboAllocation, &info);
+    uboMapped = info.pMappedData;
 }
 
 void SSAOPass::createLocalDescriptors()
 {
-	std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
-	bindings[0].binding = 0;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	bindings[0].descriptorCount = 1;
-	bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-	bindings[1].binding = 1;
-	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	bindings[1].descriptorCount = 1;
-	bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    localSetLayout = descriptorManager->createSetLayout(
+        std::vector<VkDescriptorSetLayoutBinding>(bindings.begin(), bindings.end()));
+    localSet = descriptorManager->allocateSet(localSetLayout);
 
-	localSetLayout = descriptorManager->createSetLayout(
-		std::vector<VkDescriptorSetLayoutBinding>(bindings.begin(), bindings.end()));
+    VkDescriptorBufferInfo bufferInfo{ uboBuffer, 0, sizeof(SSAOUbo) };
+    VkDescriptorImageInfo noiseInfo{ noiseTexture.sampler, noiseTexture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-	localSet = descriptorManager->allocateSet(localSetLayout);
-
-	VkDescriptorBufferInfo bufferInfo{ uboBuffer, 0, sizeof(SSAOUbo) };
-	VkDescriptorImageInfo noiseInfo{ noiseTexture.sampler, noiseTexture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-
-	std::array<VkWriteDescriptorSet, 2> writes{};
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = localSet;
-	writes[0].dstBinding = 0;
-	writes[0].dstArrayElement = 0;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	writes[0].descriptorCount = 1;
-	writes[0].pBufferInfo = &bufferInfo;
-
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = localSet;
-	writes[1].dstBinding = 1;
-	writes[1].dstArrayElement = 0;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	writes[1].descriptorCount = 1;
-	writes[1].pImageInfo = &noiseInfo;
-
-	vkUpdateDescriptorSets(device.getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = localSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].descriptorCount = 1;
+    writes[0].pBufferInfo = &bufferInfo;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = localSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].descriptorCount = 1;
+    writes[1].pImageInfo = &noiseInfo;
+    vkUpdateDescriptorSets(device.getDevice(), 2, writes.data(), 0, nullptr);
 }
 
 void SSAOPass::createPipeline()
 {
-	std::array<VkDescriptorSetLayout, 2> layouts = { globalSetLayout, localSetLayout };
+    std::array<VkDescriptorSetLayout, 2> layouts = { globalSetLayout, localSetLayout };
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(layouts.size());
+    pipelineLayoutInfo.pSetLayouts = layouts.data();
+    vkCreatePipelineLayout(device.getDevice(), &pipelineLayoutInfo, nullptr, &pipelineLayout);
 
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(layouts.size());
-	pipelineLayoutInfo.pSetLayouts = layouts.data();
-	vkCreatePipelineLayout(device.getDevice(), &pipelineLayoutInfo, nullptr, &pipelineLayout);
+    PipelineConfigInfo config{};
+    Pipeline::defaultPipelineConfigInfo(config, WIDTH, HEIGHT);
+    config.colorAttachmentFormats = { VK_FORMAT_R8_UNORM };   // 与渲染图里的输出格式一致
+    config.pipelineLayout = pipelineLayout;
+    config.bindingDescriptions.clear();
+    config.attributeDescriptions.clear();
+    config.depthStencilInfo.depthTestEnable = VK_FALSE;
+    config.depthStencilInfo.depthWriteEnable = VK_FALSE;
 
-	PipelineConfigInfo config{};
-	Pipeline::defaultPipelineConfigInfo(config, currentExtent.width, currentExtent.height);
-	config.renderPass = renderPass;
-	config.pipelineLayout = pipelineLayout;
-	config.subpass = 0;
-
-	config.bindingDescriptions.clear();
-	config.attributeDescriptions.clear();
-	config.depthStencilInfo.depthTestEnable = VK_FALSE;
-	config.depthStencilInfo.depthWriteEnable = VK_FALSE;
-
-	ssaoPipeline = std::make_unique<Pipeline>(device, "../shaders/fullscreen.vert.spv", "../shaders/ssao.frag.spv", config);
+    ssaoPipeline = std::make_unique<Pipeline>(device,
+        SENTINEL_SHADER_DIR "fullscreen.vert.spv", SENTINEL_SHADER_DIR "ssao.frag.spv", config);
 }
 
-void SSAOPass::execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
+void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
-	SSAOUbo ubo{};
-	ubo.projection = frameInfo.projectionMatrix;
-	ubo.view = frameInfo.viewMatrix;
-	ubo.radius = frameInfo.settings.ssaoRadius;
-	ubo.bias = frameInfo.settings.ssaoBias;
-	ubo.kernelSize = frameInfo.settings.ssaoKernelSize;
-	ubo.enabled = frameInfo.settings.ssaoEnabled ? 1.0f : 0.0f;
+    // 每帧上传 SSAO 参数
+    SSAOUbo ubo{};
+    ubo.projection = frameInfo.projectionMatrix;
+    ubo.view = frameInfo.viewMatrix;
+    ubo.radius = frameInfo.settings.ssaoRadius;
+    ubo.bias = frameInfo.settings.ssaoBias;
+    ubo.kernelSize = frameInfo.settings.ssaoKernelSize;
+    ubo.enabled = frameInfo.settings.ssaoEnabled ? 1.0f : 0.0f;
+    memcpy(ubo.samples, ssaoKernel.data(), 64 * sizeof(glm::vec4));
+    memcpy(uboMapped, &ubo, sizeof(ubo));
+    vmaFlushAllocation(device.getVmaAllocator(), uboAllocation, 0, sizeof(ubo));
 
-	memcpy(ubo.samples, ssaoKernel.data(), 16 * sizeof(glm::vec4));
-	memcpy(uboMapped, &ubo, sizeof(ubo));
+    VkClearValue clear{};
+    clear.color = { { 1.0f, 1.0f, 1.0f, 1.0f } };
 
-	VkRenderPassBeginInfo passInfo{};
-	passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	passInfo.renderPass = renderPass;
-	passInfo.framebuffer = framebuffer;
-	passInfo.renderArea.offset = { 0, 0 };
-	passInfo.renderArea.extent = currentExtent;
+    auto& pass = graph.addGraphicsPass("SSAO");
+    pass.read(resources.gbPosition);
+    pass.read(resources.gbNormal);
+    pass.writeColor(resources.ssao, VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
-	VkClearValue clearColor = { {{1.0f, 1.0f, 1.0f, 1.0f}} };
-	passInfo.clearValueCount = 1;
-	passInfo.pClearValues = &clearColor;
+    // 注意：这里**故意不调用 pass.setEnabled(ssaoEnabled)**。
+    //
+    // 关掉 SSAO 如果跳过整个 Pass，ssao 这张瞬时图整帧就没人写，
+    // 而 lighting.frag 的 `ambient *= ssao` 是无条件执行的 —— 环境光会被
+    // 乘以未定义内容（画面忽明忽暗），而且验证层不会报（从 UNDEFINED 转出合法）。
+    // 所以开关下沉到着色器：Pass 照跑，关闭时片元着色器直接输出中性白。
+    // 开销是一次几乎没有纹理采样的全屏写入，换来的是"开关状态"永远有定义。
 
-	vkCmdBeginRenderPass(commandBuffer, &passInfo, VK_SUBPASS_CONTENTS_INLINE);
+    // -----------------------------------------------------------------------
+    // 反面用例（SENTINEL_SIMULATE_SSAO_SKIP=1）：
+    // 故意把上面那个错误写法做出来 —— 跳过整个 Pass。
+    // 用途是验证渲染图的语义校验真的能拦住它，而不是只写在注释里当传说。
+    //   RenderGraph::validateWriteCoverage() 应该抛出
+    //   「Pass "Lighting" 读取了瞬时纹理 "SSAO"，但没有任何 Pass 写过它」。
+    // 实测（5 帧自检）确实在启动第一帧就报出来了，而且是可读的中文错误。
+    // 环境变量只读一次 —— 没必要每帧走一次 getenv。
+    // -----------------------------------------------------------------------
+    static const bool simulateSkip = (std::getenv("SENTINEL_SIMULATE_SSAO_SKIP") != nullptr);
+    if (simulateSkip)
+        pass.setEnabled(false);
 
-	ssaoPipeline->bind(commandBuffer);
-
-	VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet();
-	VkDescriptorSet sets[] = { globalSet, localSet };
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		pipelineLayout, 0, 2, sets, 0, nullptr);
-
-	vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-
-	vkCmdEndRenderPass(commandBuffer);
+    pass.execute([this, &frameInfo](VkCommandBuffer cmd)
+    {
+        ssaoPipeline->bind(cmd);
+        VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet();
+        VkDescriptorSet sets[] = { globalSet, localSet };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 2, sets, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    });
 }

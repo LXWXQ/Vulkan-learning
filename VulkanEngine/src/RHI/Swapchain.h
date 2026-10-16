@@ -19,6 +19,7 @@ class Swapchain
         VkExtent2D getSwapChainExtent() { return swapChainExtent; }
         uint32_t imageCount() { return swapChainImages.size(); }
         VkImageView getImageView(int index) { return swapChainImageViews[index]; }
+        VkImage     getImage(int index) { return swapChainImages[index]; }
         VkFramebuffer getFramebuffer(int index) { return swapChainFramebuffers[index]; }
 
         void createFramebuffers(VkRenderPass renderPass);

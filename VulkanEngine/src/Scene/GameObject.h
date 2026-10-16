@@ -3,6 +3,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include "Core/Material.h"
+#include "Core/MaterialSlot.h"
 struct TransformComponent 
 {
     glm::vec3 translation{}; // 坐标
@@ -42,7 +43,9 @@ public:
 	bool isSkybox = false;
 	bool isGrid = false;
 	std::shared_ptr<Material> material;
-	uint32_t materialSetIndex = 0;
+    // 未分配时是 kInvalidMaterialSlot。绝不能用 0 —— 0 是合法槽位号，
+    // 用 0 当默认值会让没有材质的物体悄悄绑到第 0 号材质上。
+    uint32_t materialSetIndex = kInvalidMaterialSlot;
 private:
     GameObject(id_t objId) : id{objId} {}
     id_t id;

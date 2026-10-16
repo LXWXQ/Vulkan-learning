@@ -3,6 +3,22 @@
 #include "Device.h"
 #include <vulkan/vulkan.h>
 #include <stdexcept>
+// G-Buffer 各附件的格式。
+// 这些格式必须和 GeometryPass::init() 里 importTexture 时填的 desc.format、
+// 以及各管线 config.colorAttachmentFormats 完全一致 —— 动态渲染下没有
+// Framebuffer 帮忙兜底，格式对不上会直接被验证层拦下。
+namespace GBufferFormat
+{
+    constexpr VkFormat Position = VK_FORMAT_R16G16B16A16_SFLOAT;
+    constexpr VkFormat Normal   = VK_FORMAT_R16G16B16A16_SFLOAT;
+    // Albedo 必须是浮点：天空盒把「线性 HDR 辐照度」直接写进这个附件
+    //（见 skybox_mrt.frag），由 PresentPass 统一做色调映射。
+    // 8bit UNORM/SRGB 会把 >1.0 的高光在写入时就截断，天空盒的太阳/亮斑
+    // 就再也进不了 Bloom —— 而且截断后的 1.0 恰好又超过 Bloom 阈值，
+    // 结果整块天空都在起辉光，变成一层假雾。
+    constexpr VkFormat Albedo   = VK_FORMAT_R16G16B16A16_SFLOAT;
+    constexpr VkFormat Pbr      = VK_FORMAT_R8G8B8A8_UNORM;
+}
 
 // 将原本的附件结构体移到这里
 struct FrameBufferAttachment 
@@ -26,7 +42,7 @@ public:
     GBuffer(const GBuffer&) = delete;
     GBuffer& operator=(const GBuffer&) = delete;
 
-    // Getters，供 Framebuffer 和 DescriptorSet 使用
+    // Getters：供 GeometryPass 导入渲染图、以及全局描述符集使用
     const FrameBufferAttachment& getPosition() const { return position; }
     const FrameBufferAttachment& getNormal() const { return normal; }
     const FrameBufferAttachment& getAlbedo() const { return albedo; }

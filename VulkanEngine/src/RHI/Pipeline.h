@@ -15,11 +15,20 @@ struct PipelineConfigInfo
     VkPipelineColorBlendStateCreateInfo colorBlendInfo;
     VkPipelineDepthStencilStateCreateInfo depthStencilInfo;
     VkPipelineLayout pipelineLayout = nullptr;
-    VkRenderPass renderPass = nullptr;
-    uint32_t subpass = 0;
+
+    // Vulkan 1.3 动态渲染：不再需要 VkRenderPass，改为声明附件格式。
+    // 管线会通过 VkPipelineRenderingCreateInfo 链进 pNext。
+    std::vector<VkFormat> colorAttachmentFormats{};
+    VkFormat depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+    VkFormat stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
 
     std::vector<VkVertexInputBindingDescription> bindingDescriptions{};
     std::vector<VkVertexInputAttributeDescription> attributeDescriptions{};
+
+    // 动态状态。非空时这些状态不会被烘焙进管线，必须在录制命令时显式设置，
+    // 否则行为未定义（验证层的 VUID-vkCmdSetViewport-None-08971 等）。
+    // 本项目所有图形管线统一启用 VIEWPORT + SCISSOR，见 defaultPipelineConfigInfo()。
+    std::vector<VkDynamicState> dynamicStates{};
 };
 
 class Pipeline 

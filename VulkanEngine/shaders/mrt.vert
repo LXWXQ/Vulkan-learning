@@ -23,6 +23,11 @@ layout(push_constant) uniform Push
 {
     mat4 modelMatrix;
     mat4 normalMatrix;
+    // D-3 bindless：材质下标 + 有效性。与 C++ 侧 SimplePushConstantData 的
+    // 尾部两个 uint32 精确对应（std430 下 uvec2 = 8 字节、对齐 8）。
+    // 顶点着色器不读它，但必须在这里声明出来 —— push_constant 块的大小是
+    // 由所有 stage 里最大的那个声明决定的；少声明会导致片元这边读越界。
+    uvec2 material;
 } push;
 
 void main() 

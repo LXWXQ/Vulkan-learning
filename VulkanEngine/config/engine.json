@@ -1,0 +1,49 @@
+{
+  "camera": {
+    "position": [
+      -0.48415136337280273,
+      5.211963176727295,
+      -29.98615074157715
+    ],
+    "rotation": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "engineSettings": {
+    "bloom": {
+      "enabled": true,
+      "intensity": 0.11999999731779099,
+      "knee": 0.5,
+      "threshold": 2.200000047683716
+    },
+    "lighting": {
+      "color": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "direction": [
+        -1.0,
+        -1.0,
+        1.0,
+        0.0
+      ],
+      "exposure": 1.0
+    },
+    "planned": {
+      "shadowEnabled": false,
+      "ssrEnabled": false
+    },
+    "ssao": {
+      "bias": 0.02500000037252903,
+      "enabled": true,
+      "kernelSize": 16,
+      "radius": 0.5
+    },
+    "windowTitle": "Vulkan Engine - Sentinel"
+  },
+  "version": 1
+}

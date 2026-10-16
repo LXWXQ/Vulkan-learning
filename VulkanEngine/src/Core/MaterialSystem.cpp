@@ -57,14 +57,19 @@ std::shared_ptr<Material> MaterialSystem::getOrCreateMaterial(const std::string&
 	return mat;
 }
 
-std::shared_ptr<Texture> MaterialSystem::loadTexture(const std::string& filepath, Device& device, VkCommandPool commandPool)
+std::shared_ptr<Texture> MaterialSystem::loadTexture(const std::string& filepath, Device& device, VkCommandPool commandPool, bool srgb)
 {
+	// 颜色贴图必须用 sRGB 格式加载：硬件采样时自动转成线性，
+	// 而且各向异性过滤是在正确的色彩空间里进行的。
+	// 数据贴图必须保持 UNORM —— 对法线/粗糙度做色彩转换会直接把数据改坏。
+	const VkFormat textureFormat = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+
 	auto it = textureCache.find(filepath);
 	if (it != textureCache.end())
 		return it->second;
 
 	std::cout << "[MaterialSystem] Loading: " << filepath << std::endl;
-	auto tex = std::make_shared<Texture>(device, filepath, VK_FORMAT_R8G8B8A8_UNORM, commandPool);
+	auto tex = std::make_shared<Texture>(device, filepath, textureFormat, commandPool);
 	textureCache[filepath] = tex;
 	return tex;
 }

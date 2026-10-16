@@ -3,6 +3,9 @@
 #include "Scene/Model.h"
 #include "Scene/GameObject.h"
 #include <glm/glm.hpp>
+#include <cstddef>   // offsetof
+#include <string>    // EngineSettings::windowTitle
+#include <functional>  // FrameInfo 的配置回调
 
 #define MAX_POINT_LIGHTS 100
 #define WIDTH 1920
@@ -27,17 +30,54 @@ struct GlobalUbo
 	alignas(16) glm::vec4 cameraPos{ 0.f };
 
 	alignas(16) int numLights = 0;
+	float exposure = 1.0f;   // D-2 起光照着色器不再读它，保留字段是为了不动 UBO 布局
 	alignas(16) PointLight pointLights[MAX_POINT_LIGHTS];
 };
+
+// ---------------------------------------------------------------------------
+// 编译期校验 C++ 结构与 GLSL std140 布局严格一致。
+// 偏移值必须和 shaders/*.vert|frag 中 GlobalUbo 的声明一一对应；
+// 一旦有人调整成员顺序或类型，这里会直接编译失败，而不是等到运行时画面错乱。
+// ---------------------------------------------------------------------------
+static_assert(offsetof(GlobalUbo, projectionView)    == 0,   "GlobalUbo.projectionView 偏移错误");
+static_assert(offsetof(GlobalUbo, ambientLightColor) == 64,  "GlobalUbo.ambientLightColor 偏移错误");
+static_assert(offsetof(GlobalUbo, lightDirection)    == 80,  "GlobalUbo.lightDirection 偏移错误");
+static_assert(offsetof(GlobalUbo, lightColor)        == 96,  "GlobalUbo.lightColor 偏移错误");
+static_assert(offsetof(GlobalUbo, cameraPos)         == 112, "GlobalUbo.cameraPos 偏移错误");
+static_assert(offsetof(GlobalUbo, numLights)         == 128, "GlobalUbo.numLights 偏移错误");
+static_assert(offsetof(GlobalUbo, exposure)          == 132, "GlobalUbo.exposure 偏移错误");
+static_assert(offsetof(GlobalUbo, pointLights)       == 144, "GlobalUbo.pointLights 偏移错误");
+static_assert(sizeof(PointLight) == 32, "PointLight 应等于两个 vec4 的大小");
+static_assert(sizeof(GlobalUbo) == 144 + MAX_POINT_LIGHTS * sizeof(PointLight), "GlobalUbo 总大小错误");
 
 struct SimplePushConstantData
 {
 	glm::mat4 modelMatrix{ 1.f };
 	glm::mat4 normalMatrix{ 1.f };
+
+	// D-3 bindless：材质下标 + 是否有效，替代原来"每换材质重绑一次描述符集"。
+	//
+	// 用两个 uint32 而不是一个（+padding），是为了让内存布局和 GLSL 里的
+	// `uvec2 material` 精确对上 —— std430 下 uvec2 占 8 字节、对齐 8，
+	// 而 C++ 的 [mat4][mat4][uvec2] 恰好也是 128 + 8 = 136，两边一致。
+	// 用 uint 而不是 int：着色器里直接拿去索引数组，省一次转换。
+	uint32_t materialId = 0;      // 材质槽位下标（kInvalidMaterialSlot 时取 0）
+	uint32_t materialValid = 0;   // 0 = 天空盒/网格这类不需要材质的物体
+
+	// 偏移必须在编译期钉死，否则"某个字段悄悄移位"会导致材质错乱，
+	// 而且这类错乱看起来像"贴图加载错了"，极难往回追。
+	static constexpr size_t kMaterialOffset = 2 * sizeof(glm::mat4);
 };
+static_assert(offsetof(SimplePushConstantData, materialId)    == SimplePushConstantData::kMaterialOffset,     "materialId 偏移必须紧跟两个 mat4");
+static_assert(offsetof(SimplePushConstantData, materialValid) == SimplePushConstantData::kMaterialOffset + 4, "materialValid 必须紧跟 materialId");
+static_assert(sizeof(SimplePushConstantData) == SimplePushConstantData::kMaterialOffset + 8,                 "push constant 大小必须与 GLSL 的 uvec2 布局一致");
 
 struct EngineSettings
 {
+	// W1：窗口标题进了配置。把它放在这里是刻意的 —— 调试时经常要按场景/质量档
+	// 起好几个实例同时看，标题是区分它们唯一的可见标识，而它又必须能改。
+	std::string windowTitle = "Vulkan Engine - Sentinel";
+
 	bool ssaoEnabled = true;
 	float ssaoRadius = 0.5f;
 	float ssaoBias = 0.025f;
@@ -48,7 +88,29 @@ struct EngineSettings
 
 	glm::vec4 directionalLightDir{ -1.0f, -1.0f, 1.0f, 0.0f };
 	glm::vec4 directionalLightColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+
+	// 曝光。1.0 在这里是"物理正确"的值：
+	// split-sum IBL 的能量已经归一化（irradiance 存的是 E/PI，
+	// specular 走 prefiltered x BRDF-LUT），所以 1.0 直接给到合理画面。
+	// 实测：老 IBL 在 1.0 下 95.9% 像素过曝，换成 split-sum 后降到 7.1%。
+	// D-2 起曝光在 PresentPass 里生效（在 Bloom 之后、tonemap 之前）——
+	// 放在光照通道里会让 Bloom 的阈值随曝光一起变，调曝光时辉光强度会乱跳。
 	float exposure = 1.0f;
+
+	// ---- Bloom（D-2）----
+	// 阈值作用在线性 HDR 上，1.0 ≈ 刚好"纯白"的亮度。
+	//
+	// 这几个默认值是实测调出来的（同一机位截屏 + 逐像素对照，见 D-2 提交说明）：
+	//   阈值 1.0 / 强度 0.04：变化超过 8 的像素只有 17%，肉眼基本看不出辉光；
+	//   阈值 1.0 / 强度 0.25：整片天空都在阈值之上，画面像蒙了一层灰白雾；
+	//   阈值 1.8 / 强度 0.30：终于能看出辉光，但把天窗那块过曝墙面整片糊白了；
+	//   阈值 0.2 / 强度 0.8 ：极端值（60.9% 像素过曝）—— 只用来自检链路是否接通。
+	// 最终 2.2 / 0.5 / 0.12：辉光收敛成"围绕强光的一圈柔和外溢"，
+	// 全屏均值与基线只差 1.2（183.5 -> 182.3），画面结构完全保留。
+	bool  bloomEnabled = true;
+	float bloomThreshold = 2.2f;
+	float bloomKnee = 0.5f;      // 软膝盖宽度，避免阈值边界出现硬边
+	float bloomIntensity = 0.12f;
 };
 
 struct RenderTelemetry
@@ -57,11 +119,18 @@ struct RenderTelemetry
 	uint32_t triangles = 0;
 	uint32_t vertices = 0;
 
+	// D-3：描述符集绑定次数。
+	// 单列一个计数器是因为 bindless 的收益**只体现在这个数字上** ——
+	// draw call 数不会变（还是 104），变的是一次绑定管多少绘制。
+	// 没有它，就没法证明"整帧只绑一次"这件事真的生效了。
+	uint32_t descriptorBinds = 0;
+
 	void reset()
 	{
 		drawCalls = 0;
 		triangles = 0;
 		vertices = 0;
+		descriptorBinds = 0;
 	}
 };
 
@@ -82,4 +151,11 @@ struct FrameInfo
 	DescriptorManager* descriptorManager = nullptr;
 	GameObject* cameraObj = nullptr;
 	CameraController* cameraController = nullptr;
+
+	// W1：配置存取的入口。
+	// 用回调而不是让 ImGuiSystem 直接持有 FirstApp，是为了不让 UI 层依赖引擎总控 ——
+	// 数据总线（FrameInfo）本来就承担"每帧把东西递给 Pass/UI"的职责，这里沿用同一套。
+	// 为空表示"当前上下文不支持配置操作"（例如还没接上）。
+	std::function<void()> onSaveConfig;
+	std::function<void()> onLoadConfig;
 };

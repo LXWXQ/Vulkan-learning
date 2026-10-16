@@ -14,7 +14,9 @@ public:
 	void cleanup();
 
 	std::shared_ptr<Material> getOrCreateMaterial(const std::string& name);
-	std::shared_ptr<Texture> loadTexture(const std::string& filepath, Device& device, VkCommandPool commandPool);
+	// srgb = true：颜色贴图（albedo / emissive），用 VK_FORMAT_*_SRGB 加载；
+	// srgb = false：数据贴图（normal / metallic-roughness / AO），必须保持 UNORM。
+	std::shared_ptr<Texture> loadTexture(const std::string& filepath, Device& device, VkCommandPool commandPool, bool srgb = false);
 	std::shared_ptr<Texture> getTexture(const std::string& filepath) const;
 
 private:

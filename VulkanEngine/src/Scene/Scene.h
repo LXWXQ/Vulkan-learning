@@ -4,6 +4,7 @@
 #include "Scene/Camera.h"
 #include "Scene/CameraController.h"
 #include "Core/MaterialSystem.h"
+#include "Core/DescriptorManager.h"
 #include "Core/FrameInfo.h"
 #include "RHI/Device.h"
 #include "RHI/Texture.h"
@@ -14,7 +15,8 @@
 class Scene
 {
 public:
-	void init(Device& device, VkCommandPool commandPool);
+	// 需要 DescriptorManager：glTF 的材质必须在加载时就分配描述符槽位
+	void init(Device& device, VkCommandPool commandPool, DescriptorManager& descriptorManager);
 	void update(float dt, GLFWwindow* window, float aspectRatio);
 	void cleanup();
 

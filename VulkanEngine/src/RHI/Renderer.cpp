@@ -118,6 +118,7 @@ void Renderer::endFrame()
     vkQueuePresentKHR(vulkanDevice.getPresentQueue(), &presentInfo);
 }
 
+#if 0   // D-1(b): 已改用 RenderGraph + 动态渲染，以下接口不再需要
 void Renderer::beginRenderPass(VkCommandBuffer commandBuffer, VkRenderPass renderPass, VkFramebuffer framebuffer, const std::vector<VkClearValue>& clearValues) 
 {
     VkRenderPassBeginInfo renderPassInfo{};
@@ -137,3 +138,4 @@ void Renderer::endRenderPass(VkCommandBuffer commandBuffer)
 {
     vkCmdEndRenderPass(commandBuffer);
 }
+#endif

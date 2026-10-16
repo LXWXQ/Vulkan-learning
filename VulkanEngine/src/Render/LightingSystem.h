@@ -4,25 +4,24 @@
 #include "Core/FrameInfo.h"
 #include <memory>
 
-class LightingSystem 
+// 光照合成逻辑。D-1(b) 起管线按附件格式创建（动态渲染）。
+class LightingSystem
 {
 public:
-    LightingSystem(Device& device, VkRenderPass renderPass, VkDescriptorSetLayout globalSetLayout);
+    LightingSystem(Device& device, VkDescriptorSetLayout globalSetLayout);
     ~LightingSystem();
 
     LightingSystem(const LightingSystem&) = delete;
     LightingSystem& operator=(const LightingSystem&) = delete;
 
-    void render(FrameInfo& frameInfo);
-    void createDebugLightPipeline(VkRenderPass renderPass);
-    void renderDebugLights(FrameInfo& frameInfo,std::shared_ptr<Model> sphereModel, VkDescriptorSet descriptorSet);
+    void render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo);
     VkPipelineLayout getPipelineLayout() const { return pipelineLayout; }
+
 private:
     void createPipelineLayout(VkDescriptorSetLayout globalSetLayout);
-    void createPipeline(VkRenderPass renderPass);
+    void createPipeline();
 
     Device& vulkanDevice;
-    VkPipelineLayout pipelineLayout;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unique_ptr<Pipeline> lightingPipeline;
-    std::unique_ptr<Pipeline> debugLightPipeline;
 };

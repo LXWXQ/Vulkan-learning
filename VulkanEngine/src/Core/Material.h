@@ -2,7 +2,8 @@
 #include <string>
 #include <memory>
 #include <glm/glm.hpp>
-#include "RHI/Texture.h" 
+#include "RHI/Texture.h"
+#include "Core/MaterialSlot.h"
 enum class AlphaMode {
     OPAQUE_MODE,  // 不透明 (绝大部分物体)
     MASK_MODE,    // 遮罩裁剪 (树叶、铁丝网，需要 discard)
@@ -12,7 +13,8 @@ enum class AlphaMode {
 class Material {
 public:
     std::string name;
-    uint32_t descriptorSetIndex = 0; // 在 DescriptorManager 中分配的材质描述符集索引
+    // 在 DescriptorManager 中分配的材质描述符集槽位；未分配时为 kInvalidMaterialSlot
+    uint32_t descriptorSetIndex = kInvalidMaterialSlot;
     // --- PBR 基础属性 ---
     glm::vec4 baseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
     float metallicFactor{1.0f};

@@ -1,9 +1,10 @@
 #include "ImGuiSystem.h"
 #include "Scene/CameraController.h"
+#include "Core/EngineConfig.h"
 #include <stdexcept>
 
-ImGuiSystem::ImGuiSystem(GLFWwindow* window, Device& device, VkRenderPass renderPass, uint32_t imageCount, VkCommandPool commandPool)
-	: vulkanDevice(device)
+ImGuiSystem::ImGuiSystem(GLFWwindow* window, Device& device, VkFormat swapchainFormat, uint32_t imageCount, VkCommandPool commandPool)
+	: vulkanDevice(device), swapchainFormat(swapchainFormat)
 {
 	VkDescriptorPoolSize pool_sizes[] =
 	{
@@ -35,8 +36,12 @@ ImGuiSystem::ImGuiSystem(GLFWwindow* window, Device& device, VkRenderPass render
 	init_info.DescriptorPool = imguiPool;
 	init_info.MinImageCount = 2;
 	init_info.ImageCount = imageCount;
-	init_info.PipelineInfoMain.RenderPass = renderPass;
-	init_info.PipelineInfoMain.Subpass = 0;
+	// 动态渲染：告诉 ImGui 后端不要用 VkRenderPass，改为声明颜色附件格式
+	init_info.UseDynamicRendering = true;
+	// 注意：这个版本(1.92.6)里字段在 PipelineInfoMain 下，不是顶层
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &this->swapchainFormat;
 	ImGui_ImplVulkan_Init(&init_info);
 }
 
@@ -55,19 +60,32 @@ void ImGuiSystem::newFrame()
 	ImGui::NewFrame();
 }
 
-void ImGuiSystem::render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
+void ImGuiSystem::prepareDrawData(FrameInfo& frameInfo)
 {
+	// 让面板宽度严格贴合内容：ImGui 的窗口宽度是"历史最大值"，一旦某帧出现过
+	// 宽内容（比如一长串路径），窗口就再也不会缩回来，在画面上永久留一块
+	// 多余的黑底把场景挡住。每帧清一次尺寸标志，面板宽度就只由当前内容决定。
+	// 高度同理 —— 面板变矮时下面不留空块。
+	ImGui::SetNextWindowSize(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+
 	ImGui::Begin("Sentinel Engine Core");
 
 	renderPerformancePanel(frameInfo.frameTime, frameInfo.telemetry);
 	renderSSAOPanel(frameInfo.settings);
 	renderLightingPanel(frameInfo.settings);
+	renderBloomPanel(frameInfo.settings);
 
 	if (frameInfo.cameraObj)
 		renderCameraPanel(*frameInfo.cameraObj, frameInfo.cameraController);
 
+	renderConfigPanel(frameInfo);
+
 	ImGui::End();
 	ImGui::Render();
+}
+
+void ImGuiSystem::renderDrawData(VkCommandBuffer commandBuffer)
+{
 	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
 }
 
@@ -80,6 +98,9 @@ void ImGuiSystem::renderPerformancePanel(float dt, RenderTelemetry& telemetry)
 	ImGui::Text("Draw Calls : %u", telemetry.drawCalls);
 	ImGui::Text("Triangles  : %u", telemetry.triangles);
 	ImGui::Text("Vertices   : %u", telemetry.vertices);
+	// D-3 bindless 的收益只体现在这一行：draw call 数不变，但绑定次数从
+	// "每个子网格一次"降到"每帧一次"。看着不起眼，它是后面实例化的前提。
+	ImGui::Text("Desc. Binds: %u", telemetry.descriptorBinds);
 }
 
 void ImGuiSystem::renderSSAOPanel(EngineSettings& settings)
@@ -107,6 +128,24 @@ void ImGuiSystem::renderLightingPanel(EngineSettings& settings)
 	ImGui::SliderFloat("Exposure", &settings.exposure, 0.1f, 5.0f);
 	ImGui::SliderFloat3("Sun Direction", &settings.directionalLightDir.x, -1.0f, 1.0f);
 	ImGui::ColorEdit3("Sun Color", &settings.directionalLightColor.x);
+}
+
+void ImGuiSystem::renderBloomPanel(EngineSettings& settings)
+{
+	if (!ImGui::CollapsingHeader("Bloom", ImGuiTreeNodeFlags_DefaultOpen))
+		return;
+
+	ImGui::Checkbox("Enable Bloom", &settings.bloomEnabled);
+
+	if (!settings.bloomEnabled)
+		return;
+
+	ImGui::Indent();
+	// 阈值作用在线性 HDR 上：1.0 附近 ≈ "刚好纯白"，调高只让最强的过曝区起辉光
+	ImGui::SliderFloat("Threshold", &settings.bloomThreshold, 0.0f, 4.0f, "%.2f");
+	ImGui::SliderFloat("Soft Knee", &settings.bloomKnee, 0.01f, 2.0f, "%.2f");
+	ImGui::SliderFloat("Intensity", &settings.bloomIntensity, 0.0f, 0.5f, "%.3f");
+	ImGui::Unindent();
 }
 
 void ImGuiSystem::renderCameraPanel(GameObject& cameraObj, CameraController* controller)
@@ -138,4 +177,47 @@ void ImGuiSystem::renderCameraPanel(GameObject& cameraObj, CameraController* con
 		ImGui::SliderFloat("Smooth Factor", &controller->smoothFactor, 1.0f, 30.0f, "%.1f");
 		ImGui::Unindent();
 	}
+}
+
+void ImGuiSystem::renderConfigPanel(FrameInfo& frameInfo)
+{
+	if (!ImGui::CollapsingHeader("Config", ImGuiTreeNodeFlags_DefaultOpen))
+		return;
+
+	const std::string& fullPath = EngineConfig::getConfigPath();
+
+	// 只显示文件名，完整路径放进 tooltip。
+	//
+	// 为什么：完整路径是绝对路径，可能有五十多个字符 —— ImGui 的窗口宽度是
+	// 由内容撑开的，一行长文本会把整个面板拉宽一大截（实测从 283px 变成 583px），
+	// 把画面左上角一大块都盖住。而且这个工程的路径里带中文目录名，
+	// 默认字体没有对应字形，会渲染成一串 "???"。
+	const size_t slash = fullPath.find_last_of("/\\");
+	const std::string fileName = (slash == std::string::npos) ? fullPath : fullPath.substr(slash + 1);
+
+	ImGui::TextUnformatted(("File: " + fileName).c_str());
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("%s", fullPath.c_str());
+
+	// 两个按钮各占一半宽度。注意 ImGui 的按钮文字如果超出按钮宽度会被裁掉，
+	// 所以宽度按可用区域算，不要写死。
+	const float spacing = ImGui::GetStyle().ItemSpacing.x;
+	const float half = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
+
+	if (ImGui::Button("Save", ImVec2(half, 0.0f)) && frameInfo.onSaveConfig)
+		frameInfo.onSaveConfig();
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Reload", ImVec2(half, 0.0f)) && frameInfo.onLoadConfig)
+		frameInfo.onLoadConfig();
+
+	ImGui::TextDisabled("(exit also saves)");
+
+	// 上一次读/写的结果。放在这里而不是只打控制台，是因为"点了保存但没生效"
+	// 这类问题必须在眼睛能看到的地方回答，不能要求用户去翻日志。
+	// 状态里可能带路径，所以让它自动换行，避免又把面板撑宽。
+	ImGui::PushTextWrapPos(0.0f);
+	ImGui::TextUnformatted(EngineConfig::getLastStatus().c_str());
+	ImGui::PopTextWrapPos();
 }

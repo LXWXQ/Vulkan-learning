@@ -57,9 +57,6 @@ void Pipeline::createGraphicsPipeline(const std::string& vertFilepath, const std
     shaderStages[1].pNext = nullptr;
     shaderStages[1].pSpecializationInfo = nullptr;
 
-    auto bindingDescription = Vertex::getBindingDescription();
-    auto attributeDescriptions = Vertex::getAttributeDescriptions();
-
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(configInfo.bindingDescriptions.size());
@@ -85,11 +82,29 @@ void Pipeline::createGraphicsPipeline(const std::string& vertFilepath, const std
     pipelineInfo.pMultisampleState = &configInfo.multisampleInfo;
     pipelineInfo.pColorBlendState = &configInfo.colorBlendInfo;
     pipelineInfo.pDepthStencilState = &configInfo.depthStencilInfo;
-    pipelineInfo.pDynamicState = nullptr;
 
+    // 动态状态：viewport / scissor 改为在录制时用 vkCmdSetViewport / vkCmdSetScissor 设置。
+    // pDynamicStates 只在本函数栈帧内有效（vkCreateGraphicsPipelines 会拷贝内容），
+    // 因此用局部结构体，避免 PipelineConfigInfo 被拷贝后指针悬空。
+    VkPipelineDynamicStateCreateInfo dynamicStateInfo{};
+    dynamicStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicStateInfo.dynamicStateCount = static_cast<uint32_t>(configInfo.dynamicStates.size());
+    dynamicStateInfo.pDynamicStates = configInfo.dynamicStates.data();
+    pipelineInfo.pDynamicState = configInfo.dynamicStates.empty() ? nullptr : &dynamicStateInfo;
+
+    // 动态渲染：不设 renderPass，改为通过 pNext 挂 VkPipelineRenderingCreateInfo
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingInfo.colorAttachmentCount = static_cast<uint32_t>(configInfo.colorAttachmentFormats.size());
+    renderingInfo.pColorAttachmentFormats = configInfo.colorAttachmentFormats.empty()
+        ? nullptr : configInfo.colorAttachmentFormats.data();
+    renderingInfo.depthAttachmentFormat = configInfo.depthAttachmentFormat;
+    renderingInfo.stencilAttachmentFormat = configInfo.stencilAttachmentFormat;
+
+    pipelineInfo.pNext = &renderingInfo;
     pipelineInfo.layout = configInfo.pipelineLayout;
-    pipelineInfo.renderPass = configInfo.renderPass;
-    pipelineInfo.subpass = configInfo.subpass;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;   // 动态渲染，无 RenderPass
+    pipelineInfo.subpass = 0;
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
     pipelineInfo.basePipelineIndex = -1;
 
@@ -163,4 +178,10 @@ void Pipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, uint32_
     configInfo.depthStencilInfo.depthCompareOp = VK_COMPARE_OP_LESS;
     configInfo.depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
     configInfo.depthStencilInfo.stencilTestEnable = VK_FALSE;
+
+    // 统一启用动态 viewport / scissor：
+    //   1. 消除原先 GeometrySystem 里「调用 vkCmdSetViewport 但管线未启用动态状态」的验证层错误
+    //   2. 将来支持窗口缩放时无需重建全部管线
+    // 注意：启用后，每个 Pass 在绑定管线后、绘制前都必须调用 cmdSetFullViewportAndScissor()
+    configInfo.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 }

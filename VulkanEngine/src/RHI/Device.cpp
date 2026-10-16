@@ -61,6 +61,36 @@ Device::~Device()
     vkDestroyInstance(instance, nullptr);
 }
 
+size_t Device::reportVmaStats(const char* stage)
+{
+    // 这个函数只在排查内存泄漏时手工插入调用（工作区里不留调用点）——
+    // vmaDestroyAllocator 看到"有分配没释放"会直接断言崩掉，而断言不说是谁，
+    // 所以在析构链各处插一次、对比 allocationCount 的变化，就能把范围缩到
+    // "两次调用之间被销毁的那些对象"。配合 SENTINEL_VMA_LEAK_CHECK=ON
+    // 打开分配命名，通常一轮就能定位。
+    VmaBudget budget[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(vmaAllocator, budget);
+
+    VkPhysicalDeviceMemoryProperties props{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &props);
+
+    size_t totalBlocks = 0, totalAllocs = 0, totalUnused = 0;
+    for (uint32_t i = 0; i < props.memoryHeapCount; ++i)
+    {
+        totalBlocks += budget[i].statistics.blockCount;
+        totalAllocs += budget[i].statistics.allocationCount;
+        const VkDeviceSize unused = budget[i].statistics.blockBytes - budget[i].statistics.allocationBytes;
+        totalUnused += static_cast<size_t>(unused);
+    }
+
+    std::cout << "[VMA] " << stage
+              << " | blockCount=" << totalBlocks
+              << " allocationCount=" << totalAllocs
+              << " 块内未用字节=" << totalUnused << std::endl;
+
+    return totalAllocs;
+}
+
 void Device::createInstance() 
 {
     if (enableValidationLayers && !checkValidationLayerSupport()) 
@@ -74,7 +104,9 @@ void Device::createInstance()
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "No Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    // 目标平台只有 Windows 桌面（用户已确认），且 RTX 2070 支持到 Vulkan 1.4，
+    // 因此直接按 1.3 起：dynamic rendering / synchronization2 都是 1.3 核心特性。
+    appInfo.apiVersion = VK_API_VERSION_1_3;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -169,13 +201,79 @@ void Device::createLogicalDevice()
         queueCreateInfos.push_back(queueCreateInfo);
     }
 
+    // ---- 查询并启用 Vulkan 1.3 / 1.2 特性 ----
+    // dynamicRendering：让渲染图彻底摆脱 VkRenderPass + VkFramebuffer
+    // synchronization2：用 vkCmdPipelineBarrier2 写屏障，比旧接口清爽得多
+    // descriptorIndexing（D-3）：bindless 的前提 —— 着色器用运行时索引去采样
+    //   一个大纹理数组，材质切换不再需要重绑描述符集
+    VkPhysicalDeviceVulkan13Features supported13{};
+    supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    VkPhysicalDeviceVulkan12Features supported12{};
+    supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    supported13.pNext = &supported12;      // 1.3 在前、1.2 挂后面
+    VkPhysicalDeviceFeatures2 supportedFeatures{};
+    supportedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supportedFeatures.pNext = &supported13;
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &supportedFeatures);
+
+    if (!supported13.dynamicRendering || !supported13.synchronization2)
+    {
+        throw std::runtime_error(
+            "GPU 不支持 dynamicRendering / synchronization2；本引擎面向 Vulkan 1.3 桌面。");
+    }
+
+    // ---- D-3 bindless 需要的 1.2 次特性 ----
+    // 只启真正必需的，不做"看到支持就全开"——每多开一个都要在这里写清用途，
+    // 否则将来没人知道某个特性为什么是开的。
+    if (!supported12.descriptorIndexing ||
+        !supported12.shaderSampledImageArrayNonUniformIndexing ||
+        !supported12.descriptorBindingPartiallyBound ||
+        !supported12.runtimeDescriptorArray ||
+        !supported12.descriptorBindingVariableDescriptorCount)
+    {
+        throw std::runtime_error(
+            "GPU 不支持 bindless 所需的 descriptorIndexing 次特性"
+            "（descriptorIndexing / shaderSampledImageArrayNonUniformIndexing / "
+            "descriptorBindingPartiallyBound / runtimeDescriptorArray / "
+            "descriptorBindingVariableDescriptorCount）。");
+    }
+
+    VkPhysicalDeviceVulkan12Features features12{};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.descriptorIndexing = VK_TRUE;
+    // 同一个 draw call 里不同像素用不同索引去采数组 —— 这正是 bindless 的形态
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // 数组尾部允许"未绑定"：材质槽位是复用池，不是所有槽位都随时有内容
+    features12.descriptorBindingPartiallyBound = VK_TRUE;
+    // 数组长度在创建描述符集时才定（不是布局里写死），这样材质容量能调
+    features12.runtimeDescriptorArray = VK_TRUE;
+    // 允许用 VkDescriptorSetVariableDescriptorCountAllocateInfo 指定数组长度。
+    // 注意这是一个**独立于 runtimeDescriptorArray 的开关** —— 少了它，
+    // 布局里带 VARIABLE_DESCRIPTOR_COUNT_BIT 会被验证层直接拒绝。
+    features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+
+    VkPhysicalDeviceVulkan13Features features13{};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.dynamicRendering = VK_TRUE;
+    features13.synchronization2 = VK_TRUE;
+    features13.pNext = &features12;        // 1.3 -> 1.2 串起来
+
+    // 注意：用 Features2 链传递特性时，pEnabledFeatures 必须为 null，
+    // 否则两条路径同时启用特性是非法用法（VUID-VkDeviceCreateInfo-pNext-04748）。
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
+
+    VkPhysicalDeviceFeatures2 enabledFeatures{};
+    enabledFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    enabledFeatures.pNext = &features13;
+    enabledFeatures.features = deviceFeatures;
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
-    createInfo.pEnabledFeatures = &deviceFeatures;
+    createInfo.pEnabledFeatures = nullptr;      // 特性全部走 pNext 链
+    createInfo.pNext = &enabledFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 

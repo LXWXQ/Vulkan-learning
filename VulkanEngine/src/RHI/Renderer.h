@@ -19,9 +19,8 @@ public:
     VkCommandBuffer beginFrame();
     void endFrame();
     
-    // 核心接口：控制 RenderPass 的生命周期
-    void beginRenderPass(VkCommandBuffer commandBuffer, VkRenderPass renderPass, VkFramebuffer framebuffer, const std::vector<VkClearValue>& clearValues);
-    void endRenderPass(VkCommandBuffer commandBuffer);
+    // D-1(b) 起渲染工作全部交给 RenderGraph（动态渲染），
+    // Renderer 只负责帧生命周期（获取图像 / 提交 / present）。
 
     // Getters
     uint32_t getCurrentImageIndex() const { return currentImageIndex; }

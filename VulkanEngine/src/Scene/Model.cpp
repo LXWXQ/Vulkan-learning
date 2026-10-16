@@ -1,152 +1,244 @@
 #include "Model.h"
 #include "RHI/Device.h"
-#include <stdexcept>
-#include <cstring>
+#include "RHI/CommandUtils.h"
 #include <stdexcept>
 #include <iostream>
+#include <unordered_map>
+
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
-Model::Model(Device& device, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
+Model::Model(Device& device, VkCommandPool commandPool, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
     : device(device)
 {
-    createVertexBuffers(vertices);
-    createIndexBuffers(indices);
+    createVertexBuffers(vertices, commandPool);
+    createIndexBuffers(indices, commandPool);
+    computeBounds(vertices);
+    finalizeSubMeshes({});
 }
 
-Model::Model(Device& device, const Model::Builder& builder) : device(device) 
+Model::Model(Device& device, VkCommandPool commandPool, const Model::Builder& builder)
+    : device(device)
 {
-    createVertexBuffers(builder.vertices);
-    createIndexBuffers(builder.indices);
+    createVertexBuffers(builder.vertices, commandPool);
+    createIndexBuffers(builder.indices, commandPool);
+    computeBounds(builder.vertices);
+    finalizeSubMeshes(builder.subMeshes);
 }
 
-Model::~Model() 
+Model::~Model()
 {
     vmaDestroyBuffer(device.getVmaAllocator(), vertexBuffer, vertexAllocation);
 
-    if (hasIndexBuffer) 
+    if (hasIndexBuffer)
     {
         vmaDestroyBuffer(device.getVmaAllocator(), indexBuffer, indexAllocation);
     }
 }
 
-void Model::createVertexBuffers(const std::vector<Vertex>& vertices)
+void Model::computeBounds(const std::vector<Vertex>& vertices)
+{
+    if (vertices.empty()) return;
+
+    boundsMin = vertices[0].position;
+    boundsMax = vertices[0].position;
+    for (const Vertex& v : vertices)
+    {
+        boundsMin = glm::min(boundsMin, v.position);
+        boundsMax = glm::max(boundsMax, v.position);
+    }
+}
+
+void Model::finalizeSubMeshes(const std::vector<SubMesh>& src)
+{
+    subMeshes = src;
+
+    // 兜底：没有子网格信息时，把整块索引当成一个子网格。
+    // 这样渲染侧统一"遍历子网格"，OBJ 与 glTF 走同一套逻辑。
+    if (subMeshes.empty() && indexCount > 0)
+        subMeshes.push_back(SubMesh{ 0, indexCount, kInvalidMaterialSlot });
+}
+
+void Model::createVertexBuffers(const std::vector<Vertex>& vertices, VkCommandPool commandPool)
 {
     vertexCount = static_cast<uint32_t>(vertices.size());
-    VkDeviceSize bufferSize = sizeof(vertices[0]) * vertexCount;
+    VkDeviceSize bufferSize = sizeof(Vertex) * vertexCount;
 
+    // 目标缓冲放在 Device-Local（显存），GPU 读取带宽最高。
+    // Sponza 这类模型顶点数很大，继续用 Host-Visible 会白白吃掉大量可映射内存。
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = bufferSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
     VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
     if (vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
         &vertexBuffer, &vertexAllocation, nullptr) != VK_SUCCESS)
         throw std::runtime_error("failed to create vertex buffer!");
 
-    void* data;
-    vmaMapMemory(device.getVmaAllocator(), vertexAllocation, &data);
-    memcpy(data, vertices.data(), (size_t)bufferSize);
-    vmaUnmapMemory(device.getVmaAllocator(), vertexAllocation);
+    uploadViaStaging(vertexBuffer, vertices.data(), bufferSize, commandPool,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
 }
 
-void Model::bind(VkCommandBuffer commandBuffer) 
-{
-    VkBuffer buffers[] = {vertexBuffer};
-    VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
-
-    if (hasIndexBuffer) 
-    {
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-    }
-}
-
-void Model::draw(VkCommandBuffer commandBuffer) 
-{
-    if (hasIndexBuffer) 
-    {
-        vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
-    } 
-    else 
-    {
-        vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
-    }
-}
-
-void Model::createIndexBuffers(const std::vector<uint32_t>& indices) 
+void Model::createIndexBuffers(const std::vector<uint32_t>& indices, VkCommandPool commandPool)
 {
     indexCount = static_cast<uint32_t>(indices.size());
     hasIndexBuffer = indexCount > 0;
     if (!hasIndexBuffer) return;
 
-    VkDeviceSize bufferSize = sizeof(indices[0]) * indexCount;
+    VkDeviceSize bufferSize = sizeof(uint32_t) * indexCount;
 
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = bufferSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 
     VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
     if (vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
         &indexBuffer, &indexAllocation, nullptr) != VK_SUCCESS)
         throw std::runtime_error("failed to create index buffer!");
 
-    void* data;
-    vmaMapMemory(device.getVmaAllocator(), indexAllocation, &data);
-    memcpy(data, indices.data(), (size_t)bufferSize);
-    vmaUnmapMemory(device.getVmaAllocator(), indexAllocation);
+    uploadViaStaging(indexBuffer, indices.data(), bufferSize, commandPool,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_ACCESS_INDEX_READ_BIT);
 }
 
-std::unique_ptr<Model> Model::createModelFromFile(Device& device, const std::string& filepath) 
+void Model::uploadViaStaging(VkBuffer dstBuffer, const void* srcData, VkDeviceSize size,
+    VkCommandPool commandPool, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess)
+{
+    // 1) staging buffer（Host-Visible）承接 CPU 数据
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+
+    VkBufferCreateInfo stagingInfo{};
+    stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingInfo.size = size;
+    stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    if (vmaCreateBuffer(device.getVmaAllocator(), &stagingInfo, &stagingAllocInfo,
+        &stagingBuffer, &stagingAllocation, nullptr) != VK_SUCCESS)
+        throw std::runtime_error("failed to create staging buffer!");
+
+    vmaCopyMemoryToAllocation(device.getVmaAllocator(), srcData, stagingAllocation, 0, size);
+
+    // 2) 一次性命令缓冲，在 GPU 侧完成拷贝
+    VkCommandBuffer cmd = cmdBeginSingleTime(device.getDevice(), commandPool);
+
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd, stagingBuffer, dstBuffer, 1, &copyRegion);
+
+    // 3) 让 TRANSFER 的写入对后续的顶点/索引读取可见。
+    //    即使本函数末尾会 vkQueueWaitIdle，这个屏障依然必需：
+    //    队列空闲只保证"执行完成"，并不建立跨阶段的"内存依赖"。
+    VkBufferMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = dstAccess;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = dstBuffer;
+    barrier.offset = 0;
+    barrier.size = size;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dstStage, 0,
+        0, nullptr, 1, &barrier, 0, nullptr);
+
+    cmdEndSingleTime(device.getDevice(), device.getGraphicsQueue(), commandPool, cmd);
+
+    vmaDestroyBuffer(device.getVmaAllocator(), stagingBuffer, stagingAllocation);
+}
+
+void Model::bind(VkCommandBuffer commandBuffer) const
+{
+    VkBuffer buffers[] = { vertexBuffer };
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
+
+    if (hasIndexBuffer)
+    {
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+    }
+}
+
+void Model::draw(VkCommandBuffer commandBuffer) const
+{
+    if (hasIndexBuffer)
+    {
+        vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
+    }
+    else
+    {
+        vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+    }
+}
+
+void Model::drawSubMesh(VkCommandBuffer commandBuffer, const SubMesh& subMesh) const
+{
+    if (!hasIndexBuffer || subMesh.indexCount == 0)
+        return;
+    vkCmdDrawIndexed(commandBuffer, subMesh.indexCount, 1, subMesh.firstIndex, 0, 0);
+}
+
+std::shared_ptr<Model> Model::createModelFromFile(Device& device, VkCommandPool commandPool, const std::string& filepath)
 {
     Builder builder{};
     builder.loadModel(filepath);
-    std::cout << "成功加载模型: " << filepath << " 顶点数: " << builder.vertices.size() << " 索引数: " << builder.indices.size() << "\n";
-    return std::make_unique<Model>(device, builder);
+    std::cout << "成功加载模型: " << filepath
+        << " 顶点数: " << builder.vertices.size()
+        << " 索引数: " << builder.indices.size()
+        << " 子网格数: " << builder.subMeshes.size() << "\n";
+    return std::make_shared<Model>(device, commandPool, builder);
 }
 
-void Model::Builder::loadModel(const std::string& filepath) 
+void Model::Builder::loadModel(const std::string& filepath)
 {
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
     std::string warn, err;
 
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, filepath.c_str())) 
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, filepath.c_str()))
     {
         throw std::runtime_error("模型加载失败: " + warn + err);
     }
 
     vertices.clear();
     indices.clear();
-    std::unordered_map<Vertex, uint32_t> uniqueVertices{}; // 用于去重的哈希表
+    subMeshes.clear();
+    std::unordered_map<Vertex, uint32_t> uniqueVertices{};   // 顶点去重
 
-    for (const auto& shape : shapes) 
+    for (const auto& shape : shapes)
     {
-        for (const auto& index : shape.mesh.indices) 
+        // 每个 shape 记录成一段连续索引 = 一个子网格，
+        // 渲染侧统一按子网格遍历，OBJ 与将来的 glTF 走同一套逻辑。
+        SubMesh subMesh{};
+        subMesh.firstIndex = static_cast<uint32_t>(indices.size());
+        subMesh.materialSlot = kInvalidMaterialSlot;   // OBJ 暂不分材质，回退到 GameObject 的材质
+
+        for (const auto& index : shape.mesh.indices)
         {
             Vertex vertex{};
 
-            // 提取顶点坐标 (OBJ 的数组是铺平的 1D 数组，所以要 * 3)
-            vertex.position = 
+            // 提取顶点坐标（OBJ 的数组是铺平的一维数组，所以索引要 * 3）
+            vertex.position =
             {
                 attrib.vertices[3 * index.vertex_index + 0],
                 attrib.vertices[3 * index.vertex_index + 1],
                 attrib.vertices[3 * index.vertex_index + 2]
             };
 
-            // 如果有颜色信息，就提取出来；没有的话默认给个白色
-            if (attrib.colors.size() > 0) 
+            if (attrib.colors.size() > 0)
             {
-                vertex.color = 
+                vertex.color =
                 {
                     attrib.colors[3 * index.vertex_index + 0],
                     attrib.colors[3 * index.vertex_index + 1],
@@ -155,10 +247,10 @@ void Model::Builder::loadModel(const std::string& filepath)
             }
             else
             {
-                vertex.color = {1.0f, 1.0f, 1.0f}; // 默认白色
+                vertex.color = { 1.0f, 1.0f, 1.0f };    // 没有顶点色的模型给白色
             }
 
-            if (attrib.normals.size() > 0 && index.normal_index >= 0) 
+            if (attrib.normals.size() > 0 && index.normal_index >= 0)
             {
                 vertex.normal =
                 {
@@ -166,28 +258,27 @@ void Model::Builder::loadModel(const std::string& filepath)
                     attrib.normals[3 * index.normal_index + 1],
                     attrib.normals[3 * index.normal_index + 2]
                 };
-            } 
-            else 
+            }
+            else
             {
-                vertex.normal = {0.0f, 1.0f, 0.0f}; // 默认法线朝上
+                vertex.normal = { 0.0f, 1.0f, 0.0f };  // 没有法线时默认朝上
             }
 
-            if (attrib.texcoords.size() > 0 && index.texcoord_index >= 0) 
+            if (attrib.texcoords.size() > 0 && index.texcoord_index >= 0)
             {
-                vertex.uv = 
+                // Vulkan 的 UV 原点在左上，OBJ / 多数建模软件在左下，需要垂直翻转
+                vertex.uv =
                 {
                     attrib.texcoords[2 * index.texcoord_index + 0],
-                    // Vulkan 的 Y 轴是朝下的，而大多数 3D 建模软件的 Y轴朝上！
-                    // 所以必须用 1.0f 减去它来进行垂直翻转，否则贴图是颠倒的！
-                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1] 
+                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
                 };
-            } 
-            else 
+            }
+            else
             {
-                vertex.uv = {0.0f, 0.0f}; // 如果模型没带 UV，给个默认值
+                vertex.uv = { 0.0f, 0.0f };
             }
 
-            if (uniqueVertices.count(vertex) == 0) 
+            if (uniqueVertices.count(vertex) == 0)
             {
                 uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
                 vertices.push_back(vertex);
@@ -195,5 +286,9 @@ void Model::Builder::loadModel(const std::string& filepath)
 
             indices.push_back(uniqueVertices[vertex]);
         }
+
+        subMesh.indexCount = static_cast<uint32_t>(indices.size()) - subMesh.firstIndex;
+        if (subMesh.indexCount > 0)
+            subMeshes.push_back(subMesh);
     }
 }

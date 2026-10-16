@@ -2,35 +2,34 @@
 #include "IRenderPass.h"
 #include "RHI/Device.h"
 #include "RHI/GBuffer.h"
+#include "RHI/RenderGraph.h"
+#include "Render/RenderResources.h"
 #include "GeometrySystem.h"
 #include <memory>
 
+// 几何通道：把场景写进 G-Buffer。
+// D-1(b) 起不再持有 VkRenderPass / VkFramebuffer，改为把工作声明进渲染图。
 class GeometryPass : public IRenderPass
 {
 public:
-	GeometryPass(Device& device, GBuffer& gBuffer,
-		VkDescriptorSetLayout globalSetLayout,
-		VkDescriptorSetLayout materialSetLayout);
-	~GeometryPass() override;
+    GeometryPass(Device& device, GBuffer& gBuffer, RenderGraph& graph,
+                 RenderResources& resources,
+                 VkDescriptorSetLayout globalSetLayout,
+                 VkDescriptorSetLayout materialSetLayout);
+    ~GeometryPass() override;
 
-	void init() override;
-	void execute(VkCommandBuffer commandBuffer, FrameInfo& frameInfo) override;
-	void onResize(VkExtent2D extent) override {}
-
-	VkRenderPass getRenderPass() const { return renderPass; }
-	const std::string getName() const override { return "Geometry Pass"; }
+    void init() override;
+    void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
+    std::string getName() const override { return "Geometry"; }
 
 private:
-	void createRenderPass();
-	void createFramebuffer();
+    Device& vulkanDevice;
+    GBuffer& gBuffer;
+    RenderGraph& renderGraph;
+    RenderResources& resources;
 
-	Device& vulkanDevice;
-	GBuffer& gBuffer;
-	VkDescriptorSetLayout globalSetLayout;
-	VkDescriptorSetLayout materialSetLayout;
+    VkDescriptorSetLayout globalSetLayout;
+    VkDescriptorSetLayout materialSetLayout;
 
-	std::unique_ptr<GeometrySystem> geometrySystem;
-
-	VkRenderPass renderPass = VK_NULL_HANDLE;
-	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    std::unique_ptr<GeometrySystem> geometrySystem;
 };

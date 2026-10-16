@@ -1,24 +1,47 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require   // D-3 bindless 的数组索引
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec3 fragPosWorld;
 layout(location = 2) in vec3 fragNormalWorld;
 layout(location = 3) in vec2 fragUV;
 
-// 向 4 个 G-Buffer 附件输出 (0 是 Swapchain，这里不用)
-layout(location = 0) out vec4 outPosition; // 附件 1
-layout(location = 1) out vec4 outNormal;   // 附件 2
-layout(location = 2) out vec4 outAlbedo;   // 附件 3
-layout(location = 3) out vec4 outPBR;      // 附件 4
+// 向 4 个 G-Buffer 颜色附件输出。
+// 编号是「输出槽位」而不是附件序号 —— 动态渲染下附件集合由 GeometryPass
+// 在渲染图里声明（Position/Normal/Albedo/Pbr/Depth），这里只管按槽位写。
+layout(location = 0) out vec4 outPosition;
+layout(location = 1) out vec4 outNormal;
+layout(location = 2) out vec4 outAlbedo;
+layout(location = 3) out vec4 outPBR;
 
-layout(set = 1, binding = 0) uniform sampler2D albedoMap;
-layout(set = 1, binding = 1) uniform sampler2D normalMap;
-layout(set = 1, binding = 2) uniform sampler2D metallicMap;
-layout(set = 1, binding = 3) uniform sampler2D roughnessMap;
+// ---------------------------------------------------------------------------
+// D-3 bindless：材质纹理不再是"每材质一个描述符集"，而是 4 个纹理数组，
+// 用同一个材质下标去索引。
+//
+// 为什么要 nonuniformEXT：同一个 draw call 里，不同像素可能属于不同子网格、
+// 用到不同材质下标。没有这个限定符，GLSL 假定数组索引在一次 draw 内是
+// "uniform"（所有调用一致），驱动就可以只取一次描述符 —— 结果就是整片
+// 用一个材质画出来。加上它等于告诉编译器"索引可能逐像素不同"。
+//
+// 数组长度是运行期决定的（VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT），
+// 所以这里写 [] 而不是写死 256。
+// ---------------------------------------------------------------------------
+layout(set = 1, binding = 0) uniform sampler2D albedoMaps[];
+layout(set = 1, binding = 1) uniform sampler2D normalMaps[];
+layout(set = 1, binding = 2) uniform sampler2D metallicMaps[];
+layout(set = 1, binding = 3) uniform sampler2D roughnessMaps[];
+
+// 材质下标通过 push constant 传进来（见 SimplePushConstantData::materialId）
+layout(push_constant) uniform Push {
+    mat4 modelMatrix;
+    mat4 normalMatrix;
+    // x = 材质槽位下标，y = 是否有效（0 = 天空盒/网格这类不需要材质的物体）
+    uvec2 material;
+} push;
 
 // 你的偏导数法线计算魔法保留在这里！
-vec3 getNormalFromMap() {
-    vec3 tangentNormal = texture(normalMap, fragUV).xyz * 2.0 - 1.0;
+vec3 getNormalFromMap(uint matId) {
+    vec3 tangentNormal = texture(normalMaps[nonuniformEXT(matId)], fragUV).xyz * 2.0 - 1.0;
     
     vec3 Q1  = dFdx(fragPosWorld);
     vec3 Q2  = dFdy(fragPosWorld);
@@ -52,26 +75,33 @@ vec3 getNormalFromMap() {
 void main() {
     // 1. 位置 (世界坐标)
     outPosition = vec4(fragPosWorld, 1.0);
-    if (length(fragNormalWorld) < 0.1)
-    {
-        outNormal = vec4(0.0, 0.0, 0.0, 1.0); 
-    } 
-    else 
-    {
-        outNormal = vec4(normalize(fragNormalWorld), 1.0);
+
+    // 2. 顶点法线（世界空间）
+    // 注意：切线空间法线贴图目前是「有意关闭」的 —— getNormalFromMap() 保留待用，
+    // 等材质系统完善、模型能提供可靠切线之后再启用。
+    outNormal = vec4(normalize(fragNormalWorld), 1.0);
+
+    // 材质下标。y == 0 表示这个物体不用材质（天空盒 / 程序化网格），
+    // 直接把顶点色当 albedo 写出去 —— 因为此时数组里那个下标可能压根没绑定内容
+    //（descriptorBindingPartiallyBound 允许数组尾部未绑定，采它就是未定义行为）。
+    const uint matId = push.material.x;
+    if (push.material.y == 0u) {
+        outAlbedo = vec4(fragColor, 1.0);
+        outPBR = vec4(0.0, 1.0, 0.0, 1.0);   // 金属度 0、粗糙度 1
+        return;
     }
 
-    // 2. 带有凹凸细节的世界法线
-    //outNormal = vec4(getNormalFromMap(), 1.0);
-    outNormal = vec4(normalize(fragNormalWorld), 1.0);
     // 3. 基础颜色
-    vec4 albedoColor = texture(albedoMap, fragUV);
-    vec3 powC = vec3(albedoColor.rgb);
-    vec3 aliasColor = pow(powC, vec3(2.2));
-    outAlbedo = vec4(aliasColor.rgb * fragColor, albedoColor.a);
+    // albedo 贴图以 SRGB 格式采样，硬件解码后拿到的已经是线性值。
+    // G-Buffer 的 albedo 附件自 D-2 起是 R16G16B16A16_SFLOAT（线性、不编码），
+    // 所以写入端**什么都不用做** —— 既不要 pow(2.2)（会双重伽马），
+    // 也不要指望硬件帮你编码（浮点格式不做 sRGB 转换）。
+    // 之所以换成浮点：天空盒借道这个通道写 >1.0 的线性 HDR，8bit 会在写入时截断。
+    vec4 albedoColor = texture(albedoMaps[nonuniformEXT(matId)], fragUV);
+    outAlbedo = vec4(albedoColor.rgb * fragColor, albedoColor.a);
 
     // 4. PBR 参数打包 (R: 金属度, G: 粗糙度)
-    float metallic = texture(metallicMap, fragUV).b; 
-    float roughness = texture(roughnessMap, fragUV).g;
+    float metallic = texture(metallicMaps[nonuniformEXT(matId)], fragUV).b;
+    float roughness = texture(roughnessMaps[nonuniformEXT(matId)], fragUV).g;
     outPBR = vec4(metallic, roughness, 0.0, 1.0);
 }

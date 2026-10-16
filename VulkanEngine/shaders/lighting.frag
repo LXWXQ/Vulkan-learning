@@ -16,6 +16,7 @@ layout(set = 0, binding = 0) uniform GlobalUbo {
     vec4 lightColor;
     vec4 cameraPos;
     int numLights;
+    float exposure;
     PointLight pointLights[100];
 } ubo;
 
@@ -26,6 +27,11 @@ layout(set = 0, binding = 3) uniform sampler2D inNormal;
 layout(set = 0, binding = 4) uniform sampler2D inAlbedo;
 layout(set = 0, binding = 5) uniform sampler2D inPbr;
 layout(set = 0, binding = 6) uniform sampler2D inSSAO;
+
+// IBL 三件套（由 IBLBaker 在初始化阶段预烘焙）
+layout(set = 0, binding = 7) uniform samplerCube irradianceMap;   // 漫反射：余弦卷积
+layout(set = 0, binding = 8) uniform samplerCube prefilteredMap;  // 镜面：GGX 预过滤 + mip 链
+layout(set = 0, binding = 9) uniform sampler2D   brdfLut;         // split-sum 的 BRDF 积分表
 
 const float PI = 3.14159265359;
 const vec2 invAtan = vec2(0.1591, 0.3183);
@@ -68,6 +74,11 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// 粗糙度感知版 Fresnel：粗糙表面的镜面反射不该有强烈的边缘亮边
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 vec3 CalcLightBRDF(vec3 L, vec3 V, vec3 N, vec3 albedo, float roughness, float metallic, vec3 F0, vec3 radiance) {
     vec3 H = normalize(V + L);
     float NDF = DistributionGGX(N, H, roughness);   
@@ -106,15 +117,6 @@ vec3 CalcPointLight(PointLight light, vec3 N, vec3 fragPos, vec3 V, vec3 albedo,
     return CalcLightBRDF(L, V, N, albedo, roughness, metallic, F0, radiance);
 }
 
-vec3 ACESFilm(vec3 x) {
-    float a = 2.51f;
-    float b = 0.03f;
-    float c = 2.43f;
-    float d = 0.59f;
-    float e = 0.14f;
-    return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
-}
-
 void main() {
     vec3 fragPosWorld = texture(inPosition, inUV).xyz;
     vec3 N            = texture(inNormal, inUV).xyz;
@@ -140,20 +142,41 @@ void main() {
     for (int i = 0; i < ubo.numLights; i++)
         Lo += CalcPointLight(ubo.pointLights[i], N, fragPosWorld, V, albedo, roughness, metallic, F0);
 
-    vec3 F_ambient = fresnelSchlick(max(dot(N, V), 0.0), F0);
-    vec3 kD_ambient = vec3(1.0) - F_ambient;
-    kD_ambient *= 1.0 - metallic;
+    // ---------------- IBL（split-sum 近似）----------------
+    // 漫反射：直接用预烘焙的 irradiance cubemap（已做余弦卷积）
+    // 镜面  ：prefiltered cubemap（按粗糙度选 mip）x BRDF 积分表
+    // 原来那句 envSpecular *= (1.0 - roughness) 是能量不守恒的粗糙近似，已替换。
+    vec3 F_ambient = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    vec3 kD_ambient = (vec3(1.0) - F_ambient) * (1.0 - metallic);
 
+    vec3 irradiance = texture(irradianceMap, N).rgb;
+    vec3 diffuseIBL = irradiance * albedo;
+
+    // prefiltered cubemap 从 128 起共 5 级 mip，所以最大 LOD = 4
+    const float MAX_REFLECTION_LOD = 4.0;
     vec3 R = reflect(-V, N);
-    vec3 envDiffuse = texture(environmentMap, SampleSphericalMap(N)).rgb;
-    vec3 envSpecular = texture(environmentMap, SampleSphericalMap(R)).rgb;
-    envSpecular *= (1.0 - roughness); 
-    
-    vec3 ambient = (kD_ambient * envDiffuse * albedo + envSpecular * F_ambient) * 0.5;
+    vec3 prefiltered = textureLod(prefilteredMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 brdf = texture(brdfLut, vec2(max(dot(N, V), 0.0), roughness)).rg;
+    vec3 specularIBL = prefiltered * (F_ambient * brdf.x + brdf.y);
+
+    vec3 ambient = kD_ambient * diffuseIBL + specularIBL;
+
+    // SSAO 近似的是「间接光」的可见性，不能去压暗方向光/点光的直接照明。
+    // 因此只调制环境项，并且要在色调映射之前应用。
+    ambient *= ssao;
 
     vec3 color = ambient + Lo;
-    color = ACESFilm(color);
-    color = pow(color, vec3(1.0/2.2));
-    color *= ssao;
+
+    // =====================================================================
+    // D-2：这里只输出「线性 HDR 辐照度」，不再做曝光 / ACES 色调映射 / gamma。
+    //
+    // 原因：Bloom 是「对亮部做模糊再叠加」的后效，它必须作用在色调映射**之前**
+    // 的线性 HDR 上 —— 一旦提前 clamp 到 [0,1]（ACES 的最后一步就是 clamp），
+    // 高光源信息就永久丢失，Bloom 只能把已经归一化的白色再涂白一遍，
+    // 得到的是"整体发灰"而不是"光溢出"。
+    //
+    // 曝光也一并挪到 PresentPass：曝光本质上是色调映射的输入缩放，
+    // 放在这里会让 Bloom 的阈值随曝光联动，调曝光时辉光强度会跟着乱变。
+    // =====================================================================
     outColor = vec4(color, 1.0);
 }
