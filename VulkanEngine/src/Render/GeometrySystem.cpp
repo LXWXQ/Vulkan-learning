@@ -93,43 +93,52 @@ void GeometrySystem::render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     // 而是让着色器走 materialValid = 0 的分支（直接输出顶点色 / 默认 PBR）。
     const uint32_t fallbackMatId = 0;
 
-    for (auto& obj : frameInfo.gameObjects)
+    for (entt::entity entity : frameInfo.visibleEntities)
     {
-        if (obj.model == nullptr) continue;
+        const MeshComponent* mesh = frameInfo.registry.try_get<MeshComponent>(entity);
+        if (!mesh || !mesh->model)
+            continue;
+
+        const WorldTransformComponent* worldTransform =
+            frameInfo.registry.try_get<WorldTransformComponent>(entity);
+        if (!worldTransform)
+            continue;
+
+        const RenderTagComponent* tag = frameInfo.registry.try_get<RenderTagComponent>(entity);
+        const MaterialComponent* materialComp = frameInfo.registry.try_get<MaterialComponent>(entity);
+
+        const bool isSkybox = tag && tag->isSkybox;
+        const bool isGrid = tag && tag->isGrid;
 
         SimplePushConstantData push{};
-        // 法线必须用「逆转置矩阵」变换，非均匀缩放下直接用 modelMatrix 会错
-        const glm::mat4 modelMatrix = obj.transform.mat4();
-        push.modelMatrix = modelMatrix;
-        push.normalMatrix = glm::transpose(glm::inverse(modelMatrix));
+        push.modelMatrix = worldTransform->matrix;
+        push.normalMatrix = worldTransform->normalMatrix;
 
-        // 天空盒 / 程序化网格：着色器不采材质数组。这个标记必须显式传下去，
-        // 因为数组里对应下标可能根本没绑过内容。
-        const bool objectUsesMaterial = !obj.isSkybox && !obj.isGrid;
+        const bool objectUsesMaterial = !isSkybox && !isGrid;
         push.materialValid = objectUsesMaterial ? 1u : 0u;
         push.materialId = fallbackMatId;
 
         auto* pipe = &geometryPipeline;
-        if (obj.isSkybox)    pipe = &skyboxPipeline;
-        else if (obj.isGrid) pipe = &gridPipeline;
+        if (isSkybox)    pipe = &skyboxPipeline;
+        else if (isGrid) pipe = &gridPipeline;
 
         (*pipe)->bind(commandBuffer);
+        mesh->model->bind(commandBuffer);
 
-        obj.model->bind(commandBuffer);
-
-        for (const SubMesh& subMesh : obj.model->getSubMeshes())
+        for (const SubMesh& subMesh : mesh->model->getSubMeshes())
         {
-            // 子网格自带材质就用它（glTF 走这条）；否则回退到 GameObject 的材质
+            const uint32_t objectMaterialSlot = materialComp
+                ? (materialComp->material ? materialComp->material->descriptorSetIndex
+                                          : materialComp->materialSetIndex)
+                : kInvalidMaterialSlot;
+
             uint32_t slot = (subMesh.materialSlot != kInvalidMaterialSlot)
                 ? subMesh.materialSlot
-                : (obj.material ? obj.material->descriptorSetIndex : obj.materialSetIndex);
+                : objectMaterialSlot;
 
             if (objectUsesMaterial && slot == kInvalidMaterialSlot)
             {
-                // 以前这里是 continue（静默少画一个子网格）。但那会让"材质装配漏了"
-                // 表现成"模型缺了一块"，很难和建模问题区分。现在退化成
-                // materialValid=0 的默认着色路径，至少还能看见几何体本身。
-                std::cerr << "[GeometrySystem] 物体 " << obj.getId()
+                std::cerr << "[GeometrySystem] entity " << entt::to_integral(entity)
                           << " 的子网格没有有效材质槽位，退化为默认着色。\n";
                 slot = fallbackMatId;
                 push.materialValid = 0u;
@@ -139,17 +148,17 @@ void GeometrySystem::render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
                 push.materialValid = objectUsesMaterial ? 1u : 0u;
             }
 
-            // 切材质只是改一个整数 —— 不再重绑描述符集
             push.materialId = (slot == kInvalidMaterialSlot) ? fallbackMatId : slot;
             vkCmdPushConstants(commandBuffer, pipelineLayout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(SimplePushConstantData), &push);
 
-            obj.model->drawSubMesh(commandBuffer, subMesh);
+            mesh->model->drawSubMesh(commandBuffer, subMesh);
 
             frameInfo.telemetry.drawCalls += 1;
             frameInfo.telemetry.triangles += subMesh.indexCount / 3;
             frameInfo.telemetry.vertices += subMesh.indexCount;
         }
     }
+
 }

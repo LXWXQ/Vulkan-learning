@@ -1,5 +1,5 @@
 #pragma once
-#include "GameObject.h"
+#include "Scene/Components.h"
 #include <GLFW/glfw3.h>
 
 class CameraController
@@ -18,8 +18,8 @@ public:
 		int sprint = GLFW_KEY_LEFT_SHIFT;
 	};
 
-	void processPCInput(GLFWwindow* window, float dt, GameObject& cameraObj);
-	void processAndroidTouchInput(float dt, GameObject& cameraObj) {}
+	void processPCInput(GLFWwindow* window, float dt, TransformComponent& cameraTransform);
+	void processAndroidTouchInput(float dt, TransformComponent& cameraTransform) {}
 	void onScroll(double xoffset, double yoffset);
 	void registerCallbacks(GLFWwindow* window);
 

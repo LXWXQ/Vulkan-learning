@@ -75,8 +75,8 @@ void ImGuiSystem::prepareDrawData(FrameInfo& frameInfo)
 	renderLightingPanel(frameInfo.settings);
 	renderBloomPanel(frameInfo.settings);
 
-	if (frameInfo.cameraObj)
-		renderCameraPanel(*frameInfo.cameraObj, frameInfo.cameraController);
+	if (frameInfo.cameraTransform)
+		renderCameraPanel(*frameInfo.cameraTransform, frameInfo.cameraController);
 
 	renderConfigPanel(frameInfo);
 
@@ -148,16 +148,16 @@ void ImGuiSystem::renderBloomPanel(EngineSettings& settings)
 	ImGui::Unindent();
 }
 
-void ImGuiSystem::renderCameraPanel(GameObject& cameraObj, CameraController* controller)
+void ImGuiSystem::renderCameraPanel(TransformComponent& cameraTransform, CameraController* controller)
 {
 	if (!ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
 
-	ImGui::DragFloat3("Position", &cameraObj.transform.translation.x, 0.1f);
+	ImGui::DragFloat3("Position", &cameraTransform.translation.x, 0.1f);
 
-	glm::vec3 eulerAngles = glm::degrees(cameraObj.transform.rotation);
+	glm::vec3 eulerAngles = glm::degrees(cameraTransform.rotation);
 	if (ImGui::DragFloat3("Rotation", &eulerAngles.x, 1.0f))
-		cameraObj.transform.rotation = glm::radians(eulerAngles);
+		cameraTransform.rotation = glm::radians(eulerAngles);
 
 	if (!controller) return;
 

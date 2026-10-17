@@ -3,7 +3,7 @@
 
 // 无效的材质描述符槽位。
 //
-// GameObject::materialSetIndex / SubMesh::materialSlot / Material::descriptorSetIndex
+// MaterialComponent::materialSetIndex / SubMesh::materialSlot / Material::descriptorSetIndex
 // 统一用它表示"尚未分配"。
 //
 // 注意不要用 0 当哨兵：0 是合法的槽位号。原代码里默认值就是 0，

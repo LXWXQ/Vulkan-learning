@@ -9,7 +9,7 @@ void CameraController::setMode(Mode m)
 	mode = m;
 }
 
-void CameraController::processPCInput(GLFWwindow* window, float dt, GameObject& cameraObj)
+void CameraController::processPCInput(GLFWwindow* window, float dt, TransformComponent& cameraTransform)
 {
 	bool rightPressed  = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT)  == GLFW_PRESS;
 	bool middlePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
@@ -28,9 +28,9 @@ void CameraController::processPCInput(GLFWwindow* window, float dt, GameObject& 
 		// 没有拖动时，把 transform 当作权威值同步回内部状态 ——
 		// ImGui 面板可以直接改 transform.translation / rotation，
 		// 如果不做这个同步，下一次按下鼠标时陈旧的 smooth* 会把镜头"拉回"旧位置。
-		smoothPosition = cameraObj.transform.translation;
-		yaw   = smoothYaw   = cameraObj.transform.rotation.y;
-		pitch = smoothPitch = glm::clamp(cameraObj.transform.rotation.x,
+		smoothPosition = cameraTransform.translation;
+		yaw   = smoothYaw   = cameraTransform.rotation.y;
+		pitch = smoothPitch = glm::clamp(cameraTransform.rotation.x,
 			-glm::half_pi<float>() + 0.01f, glm::half_pi<float>() - 0.01f);
 
 		// 同步轨道焦点，避免切到 Orbit 模式时镜头跳回旧焦点
@@ -101,8 +101,8 @@ void CameraController::processPCInput(GLFWwindow* window, float dt, GameObject& 
 	}
 
 	// 写回"实际使用的"已平滑值，保证 ImGui 显示的数字和画面一致
-	cameraObj.transform.translation = smoothPosition;
-	cameraObj.transform.rotation = { smoothPitch, smoothYaw, 0.0f };
+	cameraTransform.translation = smoothPosition;
+	cameraTransform.rotation = { smoothPitch, smoothYaw, 0.0f };
 }
 
 void CameraController::onScroll(double, double yoffset)

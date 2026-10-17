@@ -7,6 +7,7 @@
 #include "Core/DescriptorManager.h"
 #include "Core/ImGuiSystem.h"
 #include "Core/EngineConfig.h"
+#include "Core/JobSystem.h"
 #include "Render/RenderPipeline.h"
 #include "Render/IBLBaker.h"
 #include "Render/RenderResources.h"
@@ -59,6 +60,7 @@ private:
 	std::array<std::unique_ptr<GBuffer>, kFramesInFlight> gBuffers;
 	std::unique_ptr<DescriptorManager> descriptorManager;
 	std::unique_ptr<Scene> scene;
+	std::unique_ptr<JobSystem> jobSystem;
 	std::unique_ptr<ImGuiSystem> imguiSystem;
 	std::unique_ptr<IBLBaker> iblBaker;
 
@@ -77,6 +79,9 @@ private:
 	std::chrono::high_resolution_clock::time_point currentTime;
 	std::chrono::high_resolution_clock::time_point lastPerfLog;
 	uint32_t framesSincePerfLog = 0;
+	double updateMsAccum = 0.0;
+	double renderMsAccum = 0.0;
+	uint32_t profiledFrames = 0;
 
 	// 自检会故意把 bloom/ssao 关掉，如果照常自动保存，一次回归跑下来
 	// 就把用户调好的配置改成了"全关"。所以自检模式下禁掉退出自动保存。

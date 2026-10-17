@@ -1,44 +1,67 @@
 #pragma once
-#include "Scene/GameObject.h"
-#include "Scene/Model.h"
+
+#include "Scene/Components.h"
 #include "Scene/Camera.h"
 #include "Scene/CameraController.h"
+#include "Scene/SpatialIndex.h"
 #include "Core/MaterialSystem.h"
 #include "Core/DescriptorManager.h"
 #include "Core/FrameInfo.h"
 #include "RHI/Device.h"
 #include "RHI/Texture.h"
+
 #include <GLFW/glfw3.h>
-#include <vector>
+#include <entt/entt.hpp>
 #include <memory>
+#include <vector>
 
 class Scene
 {
 public:
-	// 需要 DescriptorManager：glTF 的材质必须在加载时就分配描述符槽位
-	void init(Device& device, VkCommandPool commandPool, DescriptorManager& descriptorManager);
-	void update(float dt, GLFWwindow* window, float aspectRatio);
-	void cleanup();
+    // DescriptorManager is required because glTF materials must reserve
+    // bindless material slots while the scene is being loaded.
+    void init(Device& device, VkCommandPool commandPool, DescriptorManager& descriptorManager);
+    void update(float dt, GLFWwindow* window, float aspectRatio);
+    void cleanup();
 
-	std::vector<GameObject>& getGameObjects() { return gameObjects; }
-	VulkanCamera& getCamera() { return camera; }
-	CameraController& getCameraController() { return cameraController; }
-	EngineSettings& getSettings() { return engineSettings; }
-	RenderTelemetry& getTelemetry() { return currentTelemetry; }
-	MaterialSystem& getMaterialSystem() { return materialSystem; }
+    entt::entity createEntity();
+    void destroyEntity(entt::entity entity);
 
-	std::shared_ptr<Model> getQuadSphereModel() const { return quadSphereModel; }
+    // Reparenting keeps HierarchyComponent::children consistent and rejects
+    // cycles. Passing entt::null makes the entity a root.
+    void setParent(entt::entity child, entt::entity parent);
 
-	GameObject cameraObject = GameObject::createGameObject();
+    entt::registry& getRegistry() { return registry; }
+    const entt::registry& getRegistry() const { return registry; }
+    const std::vector<entt::entity>& getVisibleEntities() const { return visibleEntities; }
+
+    entt::entity getCameraEntity() const { return cameraEntity; }
+    TransformComponent& getCameraTransform() { return registry.get<TransformComponent>(cameraEntity); }
+    const TransformComponent& getCameraTransform() const { return registry.get<TransformComponent>(cameraEntity); }
+
+    VulkanCamera& getCamera() { return camera; }
+    CameraController& getCameraController() { return cameraController; }
+    EngineSettings& getSettings() { return engineSettings; }
+    RenderTelemetry& getTelemetry() { return currentTelemetry; }
+    MaterialSystem& getMaterialSystem() { return materialSystem; }
+
+    // D-7 regression test: hierarchy transform propagation + uniform-grid query.
+    static bool selfTest();
 
 private:
-	std::vector<GameObject> gameObjects;
-	VulkanCamera camera{};
-	CameraController cameraController{};
+    void updateWorldTransforms();
+    void rebuildSpatialIndex();
+    void updateVisibility(const glm::mat4& viewProjection);
 
-	std::shared_ptr<Model> quadSphereModel;
+    entt::registry registry;
+    entt::entity cameraEntity = entt::null;
+    SpatialIndex spatialIndex{ 16.0f };
+    std::vector<entt::entity> visibleEntities;
 
-	EngineSettings engineSettings;
-	RenderTelemetry currentTelemetry;
-	MaterialSystem materialSystem;
+    VulkanCamera camera{};
+    CameraController cameraController{};
+
+    EngineSettings engineSettings;
+    RenderTelemetry currentTelemetry;
+    MaterialSystem materialSystem;
 };

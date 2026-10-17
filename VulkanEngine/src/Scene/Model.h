@@ -87,7 +87,7 @@ struct SubMesh
     uint32_t firstIndex = 0;      // 索引缓冲内的第一个索引（元素，不是字节）
     uint32_t indexCount = 0;
     // 该子网格使用的材质槽位。为 kInvalidMaterialSlot 表示"未指定"，
-    // 渲染时回退到所属 GameObject 的 materialSetIndex。
+    // 渲染时回退到所属实体的 MaterialComponent::materialSetIndex。
     uint32_t materialSlot = kInvalidMaterialSlot;
 };
 

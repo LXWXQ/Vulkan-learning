@@ -1,5 +1,8 @@
 # AI_Readme — VulkanEngine "Sentinel"
 
+> 新对话请优先读 `HANDOFF.md` 和 `TECH_DEBT.md`；未来主功能路线在 `FUTURE_PLAN.md`。
+> 本文档是深入手册，旧技术债清单保留作历史证据，当前优先级以 `TECH_DEBT.md` 为准。
+
 > 面向「接手继续开发的 AI / 新开发者」。本文档只描述**代码里真实存在**的东西。
 >
 > 上一次全面重写：D-2（Bloom + Present + HDR 中间目标）完成之后。
@@ -72,10 +75,10 @@ D-2 提交时记录的前后对照（同一个机位、鼠标移出窗口保证�
 | tinyobjloader | `3rdParty/tinyobjloader` | OBJ 解析 | 在用（`Model.cpp`） |
 | VMA | `3rdParty/VulkanMemoryAllocator` | 显存分配 | 在用（**所有** image/buffer 都走 VMA） |
 | tinygltf | `3rdParty/tinygltf` | glTF 2.0 解析（Sponza） | 在用（`GLTFLoader.cpp`） |
-| **EnTT** | `3rdParty/entt` | ECS | **只有 include 路径，代码里一次都没用** |
+| EnTT | `3rdParty/entt` | ECS | 在用（**v3.16.0**，C++17） |
 | **spdlog** | `3rdParty/spdlog` | 日志 | **只有 include 路径，代码里一次都没用**（现状是 `std::cout` / `std::cerr`） |
 
-> EnTT / spdlog 是 D-1(a) 一起拉进来的，当时的目标是 D-7（ECS）和替换散落的 `std::cout`。目前它们只体现在 `CMakeLists.txt` 的 `target_include_directories` 里，**还没有任何翻译单元 include 它们**。
+> EnTT 已在 D-7 接入；spdlog 仍只配了 include 路径，日志继续用 `std::cout` / `std::cerr`。
 
 ### 2.3 计划接入（还没进 3rdParty）
 
@@ -177,6 +180,7 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")     # <- 注意：没有 CONFIGURE_DEPEND
 .\build\Debug\VulkanEngine.exe --selftest --no-bloom         # 关掉 Bloom
 .\build\Debug\VulkanEngine.exe --selftest --no-ssao          # 关掉 SSAO
 .\build\Debug\VulkanEngine.exe --selftest --no-bloom --no-ssao
+.\build\Debug\VulkanEngine.exe --jobtest                     # D-6 JobSystem 独立自检（不创建 Vulkan 窗口）
 ```
 
 走的是**完整的** `update()` + `render()`（含 ImGui 构建与提交、present），只是用固定 `dt = 1/60` 推进、不依赖窗口事件循环，跑完 N 帧后 `vkDeviceWaitIdle` 退出。
@@ -194,7 +198,7 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")     # <- 注意：没有 CONFIGURE_DEPEND
 ```
 VulkanEngine/
 ├── CMakeLists.txt              # 依赖、源文件 glob、AssetPaths 生成、shader 编译
-├── main.cpp                    # 入口：关 stdout 缓冲、chcp 65001、解析命令行（--selftest / --no-bloom / --no-ssao）、构造 FirstApp、try/catch
+├── main.cpp                    # 入口：关 stdout 缓冲、chcp 65001、解析命令行（--selftest / --no-bloom / --no-ssao / --jobtest）、构造 FirstApp、try/catch
 ├── AI_Readme.md                # 本文档
 ├── ARCHITECTURE.md             # 架构设计文档
 ├── cmake/
@@ -222,6 +226,7 @@ VulkanEngine/
     │   ├── Descriptor.h/.cpp         # 【已废弃】DescriptorAllocator + DescriptorBuilder，不在渲染路径上
     │   ├── DescriptorManager.h/.cpp  # 描述符池 / Set 0 全局 / Set 1 材质槽位（唯一在用的描述符系统）
     │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
+    │   ├── JobSystem.h/.cpp         # D-6 CPU 线程池 / submit / parallelFor
     │   ├── FrameInfo.h               # GlobalUbo + EngineSettings + RenderTelemetry + FrameInfo（每帧数据总线）+ std140 静态断言
     │   ├── ImGuiSystem.h/.cpp        # ImGui 初始化 + 面板 + prepareDrawData/renderDrawData 两段式
     │   ├── Material.h                # PBR 材质 + 缺贴图时的静态兜底 VkDescriptorImageInfo
@@ -250,10 +255,11 @@ VulkanEngine/
     │   ├── Texture.h/.cpp            # 文件/内存 → 纹理；LDR(sRGB/UNORM) 与 HDR(RGBA32F) 两条路径
     │   └── CubemapTexture.h/.cpp     # 立方体贴图：一个 CUBE view + 每 (mip, face) 一个 2D view
     └── Scene/
-        ├── Scene.h/.cpp              # 场景装配（Sponza / Helmet 回退 / 天空盒）+ 相机更新 + 遥测
+        ├── Scene.h/.cpp              # EnTT registry + 场景装配 + world transform + frustum culling
+        ├── Components.h              # Transform/Hierarchy/Mesh/Material/RenderTag/Bounds/Camera 组件
+        ├── SpatialIndex.h/.cpp       # 均匀网格 broad phase + AABB 查询
         ├── Camera.h/.cpp             # VulkanCamera：手写透视矩阵 + YXZ 欧拉视图矩阵
         ├── CameraController.h/.cpp   # FPS + Orbit 双模式输入 + 阻尼平滑
-        ├── GameObject.h              # TransformComponent（T*Ry*Rx*Rz*S）+ move-only GameObject
         ├── Model.h/.cpp              # Vertex/SubMesh + Device-Local 顶点索引缓冲（staging 上传）+ OBJ 解析
         └── GLTFLoader.h/.cpp         # tinygltf 加载 glTF（几何烘焙到世界空间 + 逐子网格材质槽位）
 ```
@@ -541,7 +547,7 @@ void RenderGraph::presentTransition(TextureHandle handle)
 |------|------|------|
 | `mrt.vert` | GeometrySystem `geometryPipeline` | 世界位置/法线/UV 输出，`mat3(normalMatrix)` 变换法线 |
 | `mrt.frag` | 同上 | 写 4 个 G-Buffer 附件；偏导数法线贴图（**当前有意关闭**，`getNormalFromMap()` 保留待用） |
-| `grid_mrt.vert/.frag` | GeometrySystem `gridPipeline` | 程序化棋盘格无限网格，`fwidth` 抗锯齿 + 距离淡出。**当前没有 GameObject 设 `isGrid = true`，所以这条管线不会被触发** |
+| `grid_mrt.vert/.frag` | GeometrySystem `gridPipeline` | 程序化棋盘格无限网格，`fwidth` 抗锯齿 + 距离淡出。**当前没有实体把 `RenderTagComponent::isGrid` 设为 true，所以这条管线不会被触发** |
 | `skybox_mrt.vert/.frag` | GeometrySystem `skyboxPipeline` | `gl_Position = pos.xyww` 深度欺骗 + 跟随相机；albedo 写线性 HDR，normal 写 0 |
 | `fullscreen.vert` | SSAOPass / BloomPass / PresentPass | 顶点索引生成全屏三角形，无顶点缓冲，输出 `[0,1]` UV |
 | `ssao.frag` | SSAOPass | **视图空间**半球采样（TBN 用 4×4 噪声旋转）+ range check；输出单通道遮蔽（1.0 = 无遮蔽） |
@@ -663,13 +669,17 @@ void cleanup();
 
 ```cpp
 void init(Device&, VkCommandPool, DescriptorManager&);
-void update(float dt, GLFWwindow*, float aspectRatio);   // 相机输入 + 视图/投影矩阵
+void update(float dt, GLFWwindow*, float aspectRatio);   // camera + hierarchy + spatial culling
 void cleanup();
-std::vector<GameObject>& getGameObjects();
+entt::entity createEntity();  void destroyEntity(entt::entity);
+void setParent(entt::entity child, entt::entity parent);
+entt::registry& getRegistry();
+const std::vector<entt::entity>& getVisibleEntities() const;
+TransformComponent& getCameraTransform();
 VulkanCamera& getCamera();  CameraController& getCameraController();
 EngineSettings& getSettings();  RenderTelemetry& getTelemetry();
 MaterialSystem& getMaterialSystem();
-GameObject cameraObject;   // 公开成员，ImGui 相机面板直接读写
+static bool selfTest();   // hierarchy + spatial index regression
 ```
 
 场景装配顺序：`debug_cube.obj`（球体，历史命名）→ Sponza（`kLoadSponza = true` 时）→ 失败则回退 DamagedHelmet → 最后永远追加一个 `isSkybox` 的 `sphere.obj`（缩放 0.1，跟随相机）。
@@ -690,21 +700,24 @@ GameObject cameraObject;   // 公开成员，ImGui 相机面板直接读写
 | `keys` | `KeyMappings` | `WASD` + `E/Q` 上下 + `LeftShift` 冲刺（`KeyMappings` 全部可在 ImGui 里改） |
 | 内部状态 | `yaw` / `pitch` / `distance` / `focusPoint` / `smoothPosition` / `smoothYaw` / `smoothPitch` | 私有 |
 
-公开方法：`processPCInput(window, dt, cameraObj)`、`processAndroidTouchInput()`（**空桩**）、`onScroll(xoff, yoff)`、`registerCallbacks(window)`、`setMode()` / `getMode()` / `setFocusPoint()`。
+公开方法：`processPCInput(window, dt, cameraTransform)`、`processAndroidTouchInput()`（**空桩**）、`onScroll(xoff, yoff)`、`registerCallbacks(window)`、`setMode()` / `getMode()` / `setFocusPoint()`。
 
 ### FrameInfo（`Core/FrameInfo.h`）—— 每帧数据总线
 
 ```cpp
 struct FrameInfo {
-    uint32_t frameIndex;              // ⚠️ 实际是「交换链图像索引」，不是帧计数器
+    uint32_t frameInFlightIndex;
+    uint32_t swapchainImageIndex;
+    uint64_t frameNumber;
     float frameTime;
     VkCommandBuffer commandBuffer;
     EngineSettings& settings;  RenderTelemetry& telemetry;
-    std::vector<GameObject>& gameObjects;
+    entt::registry& registry;
+    const std::vector<entt::entity>& visibleEntities;
     glm::mat4 projectionMatrix, viewMatrix;
     VkBuffer globalUboBuffer;
     DescriptorManager* descriptorManager;
-    GameObject* cameraObj;  CameraController* cameraController;
+    TransformComponent* cameraTransform;  CameraController* cameraController;
 };
 ```
 
@@ -1039,8 +1052,10 @@ Remove-Item Env:\SENTINEL_SIMULATE_SSAO_SKIP
 | **W1** | **运行时配置持久化**（`EngineConfig` + `config/engine.json` + 面板 Save/Reload）；顺带修掉**析构顺序导致的 VMA 泄漏**（这个 bug 一直被 TerminateProcess 掩盖着） | ✅ `25ae42f` |
 | **W2** | **渲染图语义校验**：瞬时资源每帧必须有人写，否则 `endFrame` 直接抛异常。沿途逼出两个设计修正（Bloom 关闭改为强度置零、`importTexture` 常驻判定回写 desc） | ✅ `4986022` |
 | **D-3** | **Bindless 材质描述符**（`descriptorIndexing`）：材质从"每材质一个 set"改成"一个 set 里 4 个纹理数组"，下标走 push constant。**`desc binds` 104 → 1**，FPS 452 → 498 | ✅ `bc703c0` |
-| **D-4（本地）** | **多帧并行 + timeline semaphore**：2 帧在飞；每帧命令缓冲 / timeline 值 / UBO / G-Buffer / SSAO / HDR / Bloom / 描述符集全部隔离；`FrameInfo` 拆分 `frameInFlightIndex` / `swapchainImageIndex` / `frameNumber` | 🟡 工作区未提交 |
-| **D-5（本地）** | **Compute + 异步计算队列**：独立 compute queue / command pool / timeline；`ComputePipeline`；RenderGraph 的 storage buffer handle、buffer barrier、compute pass 与 buffer 语义校验；`ComputeProbePass` 完成 GPU 写 + CPU 读回验证 | 🟡 工作区未提交 |
+| **D-4** | **多帧并行 + timeline semaphore**：2 帧在飞；每帧命令缓冲 / timeline 值 / UBO / G-Buffer / SSAO / HDR / Bloom / 描述符集全部隔离；`FrameInfo` 拆分 `frameInFlightIndex` / `swapchainImageIndex` / `frameNumber` | ✅ `cd7d695` |
+| **D-5** | **Compute + 异步计算队列**：独立 compute queue / command pool / timeline；`ComputePipeline`；RenderGraph 的 storage buffer handle、buffer barrier、compute pass 与 buffer 语义校验；`ComputeProbePass` 完成 GPU 写 + CPU 读回验证 | ✅ `cd7d695` |
+| **D-6（本地）** | **Job System**：`std::thread` worker pool、`submit()` / `JobHandle`、`parallelFor()`、异常传播、嵌套调用防死锁；`--jobtest` 与四种渲染 selftest 均通过 | 🟡 工作区未提交 |
+| **D-7（本地）** | **EnTT ECS + Transform 层级 + 空间索引**：`entt::registry`、父子 Transform、world/normal matrix、均匀网格 broad phase、frustum-AABB culling；GeometrySystem 改为遍历可见实体 | 🟡 工作区未提交 |
 
 **D-2 一共动了 25 个文件、+1039 行**，其中新增了 4 个 Pass 级文件（`BloomPass.*` / `PresentPass.*`）和 4 个 shader（`bloom_bright/down/up.frag` / `present.frag`）。
 值得注意的是：**这 9 个新 Pass（1 亮部提取 + 3 降采样 + 3 上采样 + 1 Present + 1 PresentTransition）没有写一行屏障代码** —— 每个 Pass 只是声明 `read` / `writeColor`，同步全由渲染图推导。这是渲染图第一次被真正压力测试。
@@ -1058,19 +1073,23 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
 
 ### 接下来（按顺序，不要跳）
 
+> 主功能路线已拆分到 `FUTURE_PLAN.md`。当前阶段请先按 `TECH_DEBT.md` 处理技术债。
+
 | 里程碑 | 内容 | 为什么排在这个位置 |
 |--------|------|-------------------|
 | ~~D-3~~ | ~~Bindless（`descriptorIndexing`）~~ | ✅ **已完成**（`bc703c0`）。`desc binds` 104 → 1，FPS 452 → 498。 |
 | ~~D-4~~ | ~~多帧并行 + timeline semaphore~~ | ✅ **已完成（本地工作区，未提交）**：2 帧在飞；`--selftest` 四种组合各 120 帧 stderr 0；实测 566 FPS。 |
 | ~~D-5~~ | ~~Compute + 异步计算队列~~ | ✅ **已完成（本地工作区，未提交）**：独立 compute queue + 双 timeline；RenderGraph 支持 storage buffer / compute pass / buffer barrier / buffer 语义校验；`ComputeProbePass` 验证 GPU 写 + CPU 读回。当前跨队列 producer/consumer 会显式拒绝。 |
-| **D-6** | **作业系统（Job System）** | 地形 / 体素生成必须并行。在这一步之前，所有"并行"都是假的。 |
-| **D-7** | **EnTT ECS + Transform 层级 + 空间索引** | 现在 `GameObject` 是"ECS-lite"（自增 ID + 手写成员），没有父子层级、没有空间查询。开放世界需要：Transform 层级（`Parent`/`Children`）+ 空间划分（BVH / 网格网格 / 体素块索引）用于剔除与查询。EnTT 依赖**已经拉进来了但一次没用**。 |
+| ~~D-6~~ | ~~作业系统（Job System）~~ | ✅ **已完成（本地工作区，未提交）**：worker pool + `JobHandle` + `parallelFor` + 嵌套防死锁 + 异常传播；`--jobtest` 通过。当前是基础设施，地形/体素尚未接入。 |
+| ~~D-7~~ | ~~EnTT ECS + Transform 层级 + 空间索引~~ | ✅ **已完成（本地工作区，未提交）**：EnTT v3.16.0；parent/children + world transform propagation；均匀网格 + frustum culling；`Scene::selfTest()` 通过。 |
 
 > D-3 完成意味着**"后面所有性能工作的前提"已经就位**：现在一次绑定可以画完整个场景。
 > D-4 已完成：帧资源生命周期（命令缓冲、UBO、描述符集、渲染图瞬时图）都已按 frame slot 隔离。
-> 下一步是 D-6（作业系统 / Job System）。
+> D-7 已完成。后续进入地形 / 体素主功能前，先处理 compute-graphics 跨队列依赖和 glTF 内部节点层级两项技术债。
 
 ### 已知技术债 / 代码与文档不一致的地方（**已验证，不是猜测**）
+
+> 当前任务排序以 `TECH_DEBT.md` 为准；本节保留详细历史证据和旧编号。
 
 1. **`mrt.frag` 的注释曾是 Albedo = SRGB 时代的**（第 62~64 行说"G-Buffer 的 albedo 附件同样是 SRGB 格式，硬件自动做 linear→sRGB 编码"）。
    D-2 已把 `GBufferFormat::Albedo` 改成 `R16G16B16A16_SFLOAT`，**注释现在是错的**：写入不再有自动编码，读出来就是线性值。同文件"向 4 个 G-Buffer 附件输出（0 是 Swapchain，这里不用）"也是动态渲染之前的话（已经没有 swapchain 附件了）。
@@ -1093,7 +1112,7 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
    `adb622d` 已经在文件顶部加了「历史遗留 / 已不在渲染路径上，不要往这里加东西」的说明（理由是"将来做 D-4 多帧并行时，多池轮转会是有参考价值的另一种思路"）。**这是一处有意保留的遗留，不是漏删** —— 但其中提到的"还有零散引用"目前已经只剩它自己（全仓库除了 `Descriptor.h/.cpp` 没有别的翻译单元引用这两个类）。
 10. **废弃 shader 仍在树里**：`shaders/light_cube.vert/.frag`、`shaders/shader.vert/.frag` 无人引用；`shaders/` 源目录里还躺着 `vert.spv` / `frag.spv` / `light_cube.*.spv` / `shader.*.spv` 等构建产物（真正的产物在 `build/shaders/`）。
 11. **EnTT / spdlog 只配了 include 路径，一行代码都没用**（日志仍是 `std::cout`/`std::cerr`）。
-12. **`gridPipeline` 不会被触发**：`GeometrySystem` 建了它、`grid_mrt.*` 也编了，但没有任何地方把 `GameObject::isGrid` 设成 `true`。
+12. **`gridPipeline` 不会被触发**：`GeometrySystem` 建了它、`grid_mrt.*` 也编了，但没有任何实体把 `RenderTagComponent::isGrid` 设成 `true`。
 13. **`FrameInfo::frameIndex` 名字有误导性**：它装的是 `renderer->getCurrentImageIndex()`（交换链图像索引），不是帧计数器。
 14. **`RenderTelemetry::vertices` 统计的是索引数**，不是顶点数（见第 1 节基线注）。
 15. ~~**销毁顺序可疑（未实测）**~~ → ✅ **已修（W1，`25ae42f`）**，而且比当初估计的严重得多：
@@ -1136,8 +1155,17 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
     这是 D-5 之后、接入 GPU 剔除/体素任务之前的第一优先级。
     另：当前 `ComputeProbePass` 是验收探针，本身有固定 GPU 开销；真正的 compute 任务
     接入后应删除或改为可选调试项。
+24. **D-6 JobSystem 还是正确性优先的基础版**：单一全局任务队列；worker 内嵌套
+    `parallelFor` 会退化为顺序执行；没有任务依赖图 / work stealing / 取消。
+    地形和体素系统接入后，如果 chunk 粒度足够大、任务之间独立，这个版本可以继续用；
+    但如果出现大量短任务或递归分块，需要升级任务调度器并重新做压力测试。
+25. **D-7 的 glTF 内部节点层级仍未保留**：导入时几何已经烘焙到世界空间，
+    entity 级 Transform 只能整体变换整个模型；要让 Sponza 内部节点/门/物件独立运动，
+    需要保留 glTF node -> primitive instance 数据。
+    另外 `SpatialIndex` 目前每帧重建，没有 dirty / 增量更新；地形 chunk 数量上来后
+    应改成只在 transform/集合变化时重建，或做分块更新。
 
-> 上面 1~3 是**会实际影响画面/正确性**的；4~12 是清理类；13~16 是命名/生命周期/一致性类；**17~23 是 W / D-3 / D-5 自己引入或暴露的**，其中 17、19、21、22、23 都有明确的"何时重新权衡 / 何时必须修"。
+> 上面 1~3 是**会实际影响画面/正确性**的；4~12 是清理类；13~16 是命名/生命周期/一致性类；**17~25 是 W / D-3 / D-5 / D-6 / D-7 自己引入或暴露的**，其中 17、19、21、22、23、24、25 都有明确的"何时重新权衡 / 何时必须修"。
 
 ---
 

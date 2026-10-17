@@ -1,6 +1,6 @@
 #pragma once
 #include "RHI/Device.h"
-#include "Scene/GameObject.h"
+#include "Scene/Components.h"
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -31,7 +31,7 @@ private:
 	void renderLightingPanel(EngineSettings& settings);
 	void renderBloomPanel(EngineSettings& settings);
 	void renderConfigPanel(FrameInfo& frameInfo);
-	void renderCameraPanel(GameObject& cameraObj, class CameraController* controller);
+	void renderCameraPanel(TransformComponent& cameraTransform, class CameraController* controller);
 
 	Device& vulkanDevice;
 	VkDescriptorPool imguiPool;

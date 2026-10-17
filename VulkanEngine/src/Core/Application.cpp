@@ -26,6 +26,9 @@ FirstApp::FirstApp()
 	CameraState loadedCamera;                 // 同样的道理：相机位姿也要在
 	const bool hasCamera = EngineConfig::load(loadedCamera);   // Scene 之后才能应用
 
+	// D-6：先启动 CPU worker 池。它不依赖 Vulkan，后续场景加载/地形生成可以复用。
+	jobSystem = std::make_unique<JobSystem>();
+
 	initWindow(loadedSettings.windowTitle);
 	vulkanDevice = std::make_unique<Device>(window);
 
@@ -62,8 +65,8 @@ FirstApp::FirstApp()
 	scene->getSettings() = loadedSettings;
 	if (hasCamera)
 	{
-		scene->cameraObject.transform.translation = loadedCamera.position;
-		scene->cameraObject.transform.rotation = loadedCamera.rotation;
+		scene->getCameraTransform().translation = loadedCamera.position;
+		scene->getCameraTransform().rotation = loadedCamera.rotation;
 		std::cout << "[Config] 已应用相机位姿 ("
 			<< loadedCamera.position.x << ", " << loadedCamera.position.y << ", " << loadedCamera.position.z << ")\n";
 	}
@@ -307,15 +310,18 @@ matSys.buildMaterialDescriptor(defaultMat, *descriptorManager);
 // ---- 判断是否真的需要 DamagedHelmet 材质 ----
 // glTF 物体的材质已经由加载器逐子网格分配好了；
 // 只有子网格没有材质的物体（OBJ 路径）才需要在这里统一指定。
+auto& registry = scene->getRegistry();
 auto needsHeroMaterial = [&]() -> bool
 {
-for (const auto& obj : scene->getGameObjects())
-{
-if (!obj.model || obj.isSkybox) continue;
-for (const auto& sub : obj.model->getSubMeshes())
-if (sub.materialSlot == kInvalidMaterialSlot) return true;
-}
-return false;
+    for (entt::entity entity : registry.view<MeshComponent, RenderTagComponent>())
+    {
+        const auto& mesh = registry.get<MeshComponent>(entity);
+        const auto& tag = registry.get<RenderTagComponent>(entity);
+        if (!mesh.model || tag.isSkybox) continue;
+        for (const auto& sub : mesh.model->getSubMeshes())
+            if (sub.materialSlot == kInvalidMaterialSlot) return true;
+    }
+    return false;
 }();
 
 std::shared_ptr<Material> heroMat = defaultMat;
@@ -338,17 +344,20 @@ matSys.buildMaterialDescriptor(heroMat, *descriptorManager);
 }
 
 // 只给"子网格没有材质"的物体指定整体材质；glTF 物体原样跳过
-for (auto& obj : scene->getGameObjects())
+for (entt::entity entity : registry.view<MeshComponent, RenderTagComponent>())
 {
-if (!obj.model) continue;
+    const auto& mesh = registry.get<MeshComponent>(entity);
+    const auto& tag = registry.get<RenderTagComponent>(entity);
+    if (!mesh.model) continue;
 
-bool hasPerSubMeshMaterial = true;
-for (const auto& sub : obj.model->getSubMeshes())
-if (sub.materialSlot == kInvalidMaterialSlot) { hasPerSubMeshMaterial = false; break; }
-if (hasPerSubMeshMaterial) continue;
+    bool hasPerSubMeshMaterial = true;
+    for (const auto& sub : mesh.model->getSubMeshes())
+        if (sub.materialSlot == kInvalidMaterialSlot) { hasPerSubMeshMaterial = false; break; }
+    if (hasPerSubMeshMaterial) continue;
 
-obj.material = obj.isSkybox ? defaultMat : heroMat;
-obj.materialSetIndex = obj.material->descriptorSetIndex;
+    MaterialComponent& materialComp = registry.get_or_emplace<MaterialComponent>(entity);
+    materialComp.material = tag.isSkybox ? defaultMat : heroMat;
+    materialComp.materialSetIndex = materialComp.material->descriptorSetIndex;
 }
 
 std::cout << "[Sentinel] 材质就绪，描述符槽位占用 "
@@ -371,8 +380,14 @@ auto newTime = std::chrono::high_resolution_clock::now();
 float frameTime = std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
 currentTime = newTime;
 
+auto updateStart = std::chrono::high_resolution_clock::now();
 update(frameTime);
+auto updateEnd = std::chrono::high_resolution_clock::now();
 render(frameTime);
+auto renderEnd = std::chrono::high_resolution_clock::now();
+updateMsAccum += std::chrono::duration<double, std::milli>(updateEnd - updateStart).count();
+renderMsAccum += std::chrono::duration<double, std::milli>(renderEnd - updateEnd).count();
+++profiledFrames;
 
 // 每 5 秒打一行性能摘要。
 // 除了日常观察，这在"无头验证"（重定向 stdout 跑一遍看验证层）时特别有用 ——
@@ -387,8 +402,13 @@ std::cout << "[Perf] " << static_cast<int>(framesSincePerfLog / perfElapsed) << 
 << " | draw calls " << t.drawCalls
 << " | desc binds " << t.descriptorBinds
 << " | triangles " << t.triangles
-<< " | vertices " << t.vertices << "\n";
+<< " | vertices " << t.vertices
+<< " | update " << (updateMsAccum / profiledFrames * 1000.0) << "us"
+<< " | render " << (renderMsAccum / profiledFrames * 1000.0) << "us\n";
 framesSincePerfLog = 0;
+updateMsAccum = 0.0;
+renderMsAccum = 0.0;
+profiledFrames = 0;
 lastPerfLog = perfNow;
 }
 }
@@ -413,8 +433,8 @@ void FirstApp::saveConfig()
 	EngineConfig::save(scene->getSettings());
 
 	CameraState cam;
-	cam.position = scene->cameraObject.transform.translation;
-	cam.rotation = scene->cameraObject.transform.rotation;
+	cam.position = scene->getCameraTransform().translation;
+	cam.rotation = scene->getCameraTransform().rotation;
 	EngineConfig::save(cam);
 }
 
@@ -423,12 +443,12 @@ void FirstApp::loadConfig()
 	EngineConfig::load(scene->getSettings());
 
 	CameraState cam;
-	cam.position = scene->cameraObject.transform.translation;
-	cam.rotation = scene->cameraObject.transform.rotation;
+	cam.position = scene->getCameraTransform().translation;
+	cam.rotation = scene->getCameraTransform().rotation;
 	if (EngineConfig::load(cam))
 	{
-		scene->cameraObject.transform.translation = cam.position;
-		scene->cameraObject.transform.rotation = cam.rotation;
+		scene->getCameraTransform().translation = cam.position;
+		scene->getCameraTransform().rotation = cam.rotation;
 	}
 
 	// 标题是按配置改的，重载之后也要跟着变 —— 否则用户会以为没生效
@@ -441,6 +461,11 @@ int FirstApp::runHeadlessSelfTest(int frames)
 	// 也能进自动化回归，而不需要有人去点一下 UI。
 	// 每帧仍然走完整的 update + render，包括 ImGui 构建与提交、present。
 	suppressAutoSave = true;   // 自检会故意关掉 Pass，别把结果写进用户配置
+
+	if (!jobSystem->selfTest())
+		throw std::runtime_error("JobSystem selfTest failed");
+	if (!Scene::selfTest())
+		throw std::runtime_error("Scene ECS/spatial selfTest failed");
 
 	const EngineSettings& s = scene->getSettings();
 	std::cout << "[SelfTest] 开始，共 " << frames << " 帧，bloom=" << (s.bloomEnabled ? 1 : 0)
@@ -479,7 +504,7 @@ void FirstApp::render(float dt)
 
 		GlobalUbo ubo{};
 		ubo.projectionView = scene->getCamera().getProjection() * scene->getCamera().getView();
-		ubo.cameraPos = glm::vec4(scene->cameraObject.transform.translation, 1.0f);
+		ubo.cameraPos = glm::vec4(scene->getCameraTransform().translation, 1.0f);
 		ubo.lightDirection = scene->getSettings().directionalLightDir;
 		ubo.lightColor = scene->getSettings().directionalLightColor;
 		ubo.numLights = 0;
@@ -500,12 +525,13 @@ void FirstApp::render(float dt)
 			commandBuffer,
 			scene->getSettings(),
 			scene->getTelemetry(),
-			scene->getGameObjects(),
+			scene->getRegistry(),
+			scene->getVisibleEntities(),
 			scene->getCamera().getProjection(),
 			scene->getCamera().getView(),
 			globalUboBuffers[frameInFlight],
 			descriptorManager.get(),
-			&scene->cameraObject,
+			&scene->getCameraTransform(),
 			&scene->getCameraController()
 		};
 

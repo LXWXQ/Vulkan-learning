@@ -1,7 +1,7 @@
 #pragma once
 #include <vulkan/vulkan.h>
-#include "Scene/Model.h"
-#include "Scene/GameObject.h"
+#include "Scene/Components.h"
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <cstddef>   // offsetof
 #include <string>    // EngineSettings::windowTitle
@@ -153,14 +153,15 @@ VkCommandBuffer commandBuffer;
 
 	EngineSettings& settings;
 	RenderTelemetry& telemetry;
-	std::vector<GameObject>& gameObjects;
+	entt::registry& registry;
+	const std::vector<entt::entity>& visibleEntities;
 
 	glm::mat4 projectionMatrix;
 	glm::mat4 viewMatrix;
 
 	VkBuffer globalUboBuffer;
 	DescriptorManager* descriptorManager = nullptr;
-	GameObject* cameraObj = nullptr;
+	TransformComponent* cameraTransform = nullptr;
 	CameraController* cameraController = nullptr;
 
 	// W1：配置存取的入口。

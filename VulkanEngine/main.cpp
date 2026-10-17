@@ -1,4 +1,5 @@
 #include "src/Core/Application.h"
+#include "src/Core/JobSystem.h"
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
@@ -31,6 +32,7 @@ int main(int argc, char** argv)
     bool selfTest = false;
     bool noBloom = false;
     bool noSSAO = false;
+    bool jobTest = false;
     int  selfTestFrames = 600;
 
     for (int i = 1; i < argc; ++i)
@@ -47,10 +49,17 @@ int main(int argc, char** argv)
         }
         else if (arg == "--no-bloom") noBloom = true;
         else if (arg == "--no-ssao")  noSSAO = true;
+        else if (arg == "--jobtest")  jobTest = true;
     }
 
     try
     {
+        if (jobTest)
+        {
+            JobSystem jobSystem;
+            return jobSystem.selfTest() ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+
         FirstApp app;
 
         if (selfTest)

@@ -222,7 +222,7 @@ void Model::Builder::loadModel(const std::string& filepath)
         // 渲染侧统一按子网格遍历，OBJ 与将来的 glTF 走同一套逻辑。
         SubMesh subMesh{};
         subMesh.firstIndex = static_cast<uint32_t>(indices.size());
-        subMesh.materialSlot = kInvalidMaterialSlot;   // OBJ 暂不分材质，回退到 GameObject 的材质
+        subMesh.materialSlot = kInvalidMaterialSlot;   // OBJ 暂不分材质，回退到实体的 MaterialComponent 材质
 
         for (const auto& index : shape.mesh.indices)
         {

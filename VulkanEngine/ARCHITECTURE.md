@@ -1,5 +1,8 @@
 # VulkanEngine "Sentinel" — 架构文档
 
+> 新对话请优先读 `HANDOFF.md` 和 `TECH_DEBT.md`；未来主功能路线在 `FUTURE_PLAN.md`。
+> 本文档描述已落地架构与历史薄弱点，当前技术债优先级以 `TECH_DEBT.md` 为准。
+
 > 本文档回答「**为什么这样设计**」，以及「各模块的边界在哪」。
 > 想快速上手构建 / 改代码，先读 `AI_Readme.md`；本文档假设你已经能把它跑起来。
 >
@@ -18,7 +21,7 @@
 | 渲染架构 | 延迟着色（Deferred + MRT） | 与"高度场地形 + 大量局部光源"的目标形态匹配：几何复杂度只影响 Geometry 一遍，光照开销与光源数相关而与三角形数无关。前向渲染在这个目标下要写一整套 clustered light list 才能打平。 |
 | 帧图管理 | **自研线性渲染图**（`RenderGraph`） | 见第 6 节。核心判断：手写屏障 90% 的痛点在"顺序执行 + 记录上次访问状态"模型下就解决了，完整 DAG（重排 / 别名化 / 自动剔除）的复杂度不值得现在付。 |
 | 显存分配 | VMA | 所有 image/buffer 都走 VMA，不用手写 `vkAllocateMemory` 的类型选择循环。`VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE` 是默认；只有需要 CPU 写的 UBO/staging 才显式要 `HOST_ACCESS_SEQUENTIAL_WRITE`。 |
-| 场景数据 | 手写 "ECS-lite"（`GameObject` + `TransformComponent`） | 当前只有"一堆物体 + 相机 + 天空盒"，还不需要 ECS 的查询/原型性能。EnTT 依赖**已经拉进来了**（D-1a），等 D-7 做 Transform 层级 + 空间索引时再切。 |
+| 场景数据 | EnTT v3.16.0 ECS | `TransformComponent` / `HierarchyComponent` / `MeshComponent` / `MaterialComponent` / `RenderTagComponent` / `BoundsComponent`；D-7 起场景查询与渲染都走 `entt::registry`。 |
 | 模型加载 | tinygltf（glTF 2.0）+ tinyobjloader（OBJ） | Sponza 是 glTF；OBJ 路径保留给调试模型（`sphere.obj` 当天空盒、`DamagedHelmet.obj` 当回退场景）。两条路径最终**都产出 `Model` + `SubMesh`**，渲染侧不区分来源。 |
 | 纹理解码 | stb_image | LDR（`stbi_load` → RGBA8）与 HDR（`stbi_loadf` → RGBA32F）一个库全覆盖，不引入额外的 HDR 解码器。 |
 | 数学 | GLM | 只有 `Camera` 手写了透视矩阵（因为 GLM 默认不是"Y 翻转 + 深度 0..1"的 Vulkan 约定），其余全用 GLM。 |
@@ -55,6 +58,7 @@ VulkanEngine/
     │   ├── Descriptor.h/.cpp         # 【死代码】DescriptorAllocator/Builder
     │   ├── DescriptorManager.h/.cpp  # Set 0 全局 + Set 1 材质槽位
     │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
+    │   ├── JobSystem.h/.cpp         # CPU worker pool / JobHandle / parallelFor
     │   ├── FrameInfo.h               # 每帧数据总线 + std140 静态断言
     │   ├── ImGuiSystem.h/.cpp        # 两段式 UI（prepare / render）
     │   ├── Material.h                # PBR 材质 + 兜底纹理
@@ -86,7 +90,8 @@ VulkanEngine/
         ├── Scene.h/.cpp
         ├── Camera.h/.cpp
         ├── CameraController.h/.cpp
-        ├── GameObject.h
+        ├── Components.h             # D-7 ECS components + AABB transform helper
+        ├── SpatialIndex.h/.cpp      # uniform-grid broad phase
         ├── Model.h/.cpp
         └── GLTFLoader.h/.cpp
 ```
@@ -198,8 +203,8 @@ Bloom 是"对亮部做模糊再叠加"的后效 —— 它必须作用在 tonema
 | **输出** | G-Buffer 4 色 + 深度 |
 
 `GeometrySystem::render` 的职责：
-- 逐 `GameObject`（只处理 `model != nullptr`）算 `modelMatrix` 和 `normalMatrix = transpose(inverse(modelMatrix))` —— 非均匀缩放下直接用 modelMatrix 变换法线会错；
-- 按 `isSkybox` / `isGrid` 选管线；
+- 逐可见 EnTT entity（`MeshComponent` + `WorldTransformComponent`）读取已算好的 world / normal matrix；
+- 按 `RenderTagComponent::isSkybox` / `isGrid` 选管线；
 - 逐 `SubMesh` 决定材质槽位：**子网格自带就用它（glTF 路径），否则回退到 `obj.material->descriptorSetIndex` / `obj.materialSetIndex`（OBJ 路径）**；
 - 用 `lastBoundSlot` 去重，**只在槽位真的变化时**才 `vkCmdBindDescriptorSets`；
 - 没有有效槽位就 `std::cerr` 报错并跳过该子网格（而不是绑一个空 set 或崩掉）；
@@ -540,6 +545,27 @@ N 个 renderFinished VkSemaphore         // 每个交换链图像一枚
 > 当前限制：compute 与 graphics 之间如果存在 producer/consumer 资源依赖，RenderGraph 会抛异常。
 > 真正的 GPU culling / 体素生成接入时，需要补跨队列 ownership transfer 与 semaphore 调度。
 
+### 6.8 CPU Job System（D-6）
+
+- `JobSystem` 用 `std::thread` 创建 `hardware_concurrency - 1` 个 worker，主线程保留给提交/等待。
+- `submit()` 返回 `JobHandle`；`JobHandle::wait()` 等待完成并传播任务异常。
+- `parallelFor(begin,end,grain,fn)` 按 grain 切 chunk，提交后等待全部完成。
+- worker 内再次调用 `parallelFor` 时退化为顺序执行，避免所有 worker 同时等待队列任务造成死锁。
+- `--jobtest` 是独立无 Vulkan 自检；`--selftest` 启动时也会跑一遍 JobSystem 自检。
+
+> 当前版本优先正确性：全局队列、无 work stealing、无任务依赖图、无取消。
+> terrain / voxel 接入后若出现大量短任务或递归分块，再根据 profile 升级调度器。
+
+### 6.9 ECS / Transform 层级 / 空间索引（D-7）
+
+- 场景实体由 `entt::registry` 管理，渲染与场景逻辑通过 component view 查询。
+- `HierarchyComponent` 保存 parent + children；`Scene::setParent()` 拒绝自环/循环。
+- `Scene::updateWorldTransforms()` 递归计算 `world = parentWorld * local`，并生成 normal matrix。
+- `BoundsComponent` 保存模型局部 AABB；`WorldBoundsComponent` 保存变换后的世界 AABB。
+- `SpatialIndex` 是均匀网格：世界 AABB 插入网格，frustum 先做 broad-phase AABB 查询，
+  再做精确 frustum-AABB 测试。天空盒不进网格，始终可见。
+- `GeometrySystem` 只遍历 `Scene::visibleEntities`，不再遍历所有场景对象。
+
 
 ---
 
@@ -549,7 +575,7 @@ N 个 renderFinished VkSemaphore         // 每个交换链图像一枚
 |--------|------|------|---------------------|------|--------|
 | `mrt.vert` | vert | Geometry | 顶点 0-3（pos/color/normal/uv）+ Set 0 UBO + push（model/normal） | `fragColor/fragPosWorld/fragNormalWorld/fragUV` | 法线用 `mat3(normalMatrix)` |
 | `mrt.frag` | frag | Geometry | 4 个 G-Buffer location + Set 1 的 4 张材质贴图 | 4 个附件 | 金属度取 `.b`、粗糙度取 `.g`（glTF 打包贴图）；切线空间法线函数**有意未启用** |
-| `grid_mrt.vert/.frag` | vert/frag | Geometry | 同上 | 4 个附件 | `fwidth` 抗锯齿棋盘格 + 3000~10000 距离淡出。**当前无 GameObject 使用** |
+| `grid_mrt.vert/.frag` | vert/frag | Geometry | 同上 | 4 个附件 | `fwidth` 抗锯齿棋盘格 + 3000~10000 距离淡出。**当前无实体使用** |
 | `skybox_mrt.vert` | vert | Geometry | 顶点位置 + Set 0 UBO + push | `outUVW`（局部方向） | `gl_Position = pos.xyww` 深度欺骗 + 加相机位置实现"跟随" |
 | `skybox_mrt.frag` | frag | Geometry | `outUVW` + Set 0 binding 1（环境图） | albedo = 线性 HDR；normal = 0 | **不做 tonemap**（D-2 修正了双重 tonemap） |
 | `fullscreen.vert` | vert | SSAO / Bloom / Present | 无顶点输入 | `outUV ∈ [0,1]` | 顶点索引生成全屏三角形，`vkCmdDraw(cmd, 3, 1, 0, 0)` |
@@ -583,9 +609,8 @@ N 个 renderFinished VkSemaphore         // 每个交换链图像一枚
 | **享元 / 缓存** | `MaterialSystem` 的 `textureCache` + `materials`（`unordered_map`） | 同一张贴图/材质只加载一次 | 用路径/名字做 key；glTF 材质按名字去重 |
 | **对象池 + 空闲栈** | `DescriptorManager` 的 `materialSets` / `slotInUse` / `freeSlots` | 256 个 set 一次性申请；"分配/归还"只改内容 + 压/弹栈，O(1) | `freeSlots` 倒序压栈，所以第一次分配拿到槽位 0（方便调试对照） |
 | **RAII** | 所有 RHI 类（`Device`/`Swapchain`/`Renderer`/`GBuffer`/`Texture`/`Pipeline`/`CubemapTexture`/`RenderGraph`）+ `IBLBaker`/`Scene` | Vulkan 句柄在析构里释放 | `RenderGraph` 只销毁 `owned == true` 的资源（导入的不碰） |
-| **静态工厂** | `GameObject::createGameObject()` / `Model::createModelFromFile()` | 自增 ID / 隐藏构造细节 | `GameObject` 的构造函数是私有的 |
-| **ECS-lite** | `GameObject` + `TransformComponent` | 移动语义 + 自增 ID + 组件式成员 | 没有系统调度、没有原型存储；D-7 换 EnTT |
-| **数据总线（帧上下文）** | `FrameInfo` | 每帧可变的东西打成一个结构体往下传 | 避免每个 Pass 都持有 `Scene*`；注意里面的 `settings`/`telemetry`/`gameObjects` 是**引用** |
+| **ECS** | EnTT `entt::registry` | 组件 + view 查询 + 轻量实体句柄 | D-7 起成为场景数据唯一事实来源 |
+| **数据总线（帧上下文）** | `FrameInfo` | 每帧可变的东西打成一个结构体往下传 | 避免每个 Pass 都持有 `Scene*`；注意里面的 `settings`/`telemetry`/`registry`/`visibleEntities` 是**引用** |
 | **单一事实来源** | `RenderResources`（资源句柄）+ `GBufferFormat`（格式）+ `kInvalidMaterialSlot`（哨兵）+ `AssetPaths.h`（路径） | 同一个事实只在一处定义 | 违反这条就会出 D-2 之前那种"注释说 SRGB、代码是 FLOAT"的问题 |
 | **编译期契约** | `static_assert(offsetof(GlobalUbo, ...))` | 让 C++ 结构与 GLSL std140 布局在**编译期**对齐 | 改成员顺序会直接编译失败，而不是运行时画面错乱 |
 | **单例式的"应用装配器"** | `FirstApp` 的构造函数 | 把创建顺序这件容易错的事集中在一处 | 代价是构造函数长；换来的是"顺序错了会立刻在这里暴露" |
@@ -729,7 +754,7 @@ main()
 - **收益**：① 渲染路径完全不需要"每个子网格一个 model matrix"的概念（Sponza 有上百个节点，逐节点 push constant 是一笔开销）；② 顶点缓冲可以合并成一个（减少绑定切换）；③ 与 OBJ 路径产出的 `Model` 完全同构。
 - **代价**：**失去了节点层级的动态性** —— 想让 Sponza 里某扇门动起来，现在做不到（几何已经烘焙死了）。这对"静态场景 + 相机漫游"的当前阶段是可接受的，但**对开放世界目标不行**：D-7（Transform 层级）必须把这部分重新设计（要么保留节点信息，要么在导入时生成实例化数据）。
 
-### 决策 14：`GameObject` 用标志位（`isSkybox` / `isGrid`）而不是类型系统
+### 决策 14：用 `RenderTagComponent` 标签而不是继承类型
 
 `GeometrySystem::render` 里：
 
@@ -740,7 +765,8 @@ else if (obj.isGrid) pipe = &gridPipeline;
 ```
 
 - **收益**：极简，不需要多态/组件注册。
-- **代价**：标志位是**互斥的**但类型上不互斥（可以同时为真，行为取决于 `if` 顺序）；新增一类几何要改 `GameObject` 和 `GeometrySystem` 两处。等 D-7 转 ECS 时，这应该变成"渲染标签组件"或"管线索引组件"。
+- **D-7 状态**：原来的 `GameObject::isSkybox/isGrid` 已迁移成 `RenderTagComponent`。
+  标签仍然是互斥语义、类型上没有强制，但现在是可选组件，渲染系统通过 view 查询。
 
 ### 决策 15：`FrameInfo` 作为每帧数据总线，用引用传递可变状态
 
@@ -852,6 +878,8 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
 
 ## 11. 附：架构上的已知薄弱点（按影响排序）
 
+> 当前可执行的技术债清单与验收标准见 `TECH_DEBT.md`；本节保留架构层面的历史说明。
+
 | # | 薄弱点 | 影响 | 建议时机 |
 |---|--------|------|---------|
 | 1 | ~~`Renderer` 单缓冲 + 单份 UBO~~ → **D-4 已修**：2 帧在飞，命令缓冲 / timeline / UBO / 瞬时图 / 描述符集均按 frame slot 隔离 | ✅ 已完成 |
@@ -859,13 +887,15 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
 | 3 | 材质槽位没有真正的回收调用方 | `releaseMaterialSet()` 是死 API；场景反复加载会慢慢吃满 256 槽 | D-3 前 |
 | 4 | ~~渲染图不支持 buffer，compute 路径只有骨架~~ → **D-5 已支持 storage buffer、compute command buffer 与异步 compute queue**；跨队列 producer/consumer 调度仍待补 | GPU culling / 体素任务接入前处理跨队列依赖 |
 | 5 | ~~瞬时资源"必须每帧都有人写"~~ → W2 覆盖 image，**D-5 已扩展到 buffer**；单个 mip/层仍未细分 | mip/层独立读写时可能有盲区 | 有需求时补 |
-| 6 | glTF 几何烘焙到世界空间，丢失节点层级 | 阻塞动态物体 / 实例化 | D-7 时重构 |
+| 6 | glTF 几何烘焙到世界空间，丢失内部节点层级；entity 级 Transform 已可用，但不能单独驱动 Sponza 内部节点 | 阻塞局部动态物体 / 实例化；开放世界资产需要保留 node-instance 层级 | 地形/体素主功能前或资产管线升级时 |
 | 7 | `LightingPass` 兼任"导入交换链" | Pass 职责不对称，init 顺序有隐式依赖 | 清理类 |
 | 8 | 遗留代码：`Descriptor.h/.cpp`（**有意保留**，文件头已注明）、`light_cube.*`、`shader.*`、`Swapchain` 的 depth/Framebuffer、`IBLBaker` 的 RenderPass/Framebuffer 残留 | 增加阅读成本 | 清理类 |
 | 9 | 自检开关只覆盖 bloom / ssao 两个 Pass | 新增可关闭的 Pass 时，那条分支就是验证盲区（要照第 3.6 节加参数） | 加新 Pass 时照做 |
 | 10 | `EngineConfig` 只持久化 `EngineSettings` + 相机位姿 | 场景/模型/材质等"资源类"状态不落盘（这是刻意的 —— 见决策 18，但将来要加"恢复上次场景"就得扩展） | 有需求时 |
 | 11 | **"关闭 Bloom"仍有 7 个全屏 Pass 的固定开销**（W2 引入） | 关掉 Bloom 并不省 GPU；在低端卡/移动端会显得"关了没变快" | Bloom 变重时改两套描述符绑定 |
 | 12 | 验证脚本的两个前提（正常关窗 / 窗口在前台）没有自动化保护 | 脚本在 `%TEMP%` 下、不在版本库；换机器要重写，写错就会得到"看着正常其实无效"的结论 | 把脚本迁进仓库 |
+| 15 | JobSystem 目前只有全局队列 / 无 work stealing / 无任务依赖图；worker 内 nested parallelFor 顺序退化 | 大量短任务时吞吐和负载均衡受限，递归任务无法并行展开 | terrain / voxel 接入后按 profile 升级 |
+| 16 | D-7 的 glTF 内部 node 层级仍然被烘焙掉；空间网格每帧重建 | 局部动态物体不可动；对象多时网格重建成本会上升 | 地形/体素主功能前或资产管线升级时 |
 | 13 | bindless 的 `normalMaps` 数组绑了但没采样（D-3） | 每个材质白占 1/4 的描述符与一次更新；256 材质 = 256 个无用描述符 | 启用切线空间法线贴图时 |
 | 14 | ~~运行期复用材质槽位会改写 GPU 可能正在读的数组项~~ → **D-4 已修**：归还前 `vkDeviceWaitIdle`。若回收进热路径再改成 timeline 延迟回收 | 性能优化时再升级 |
 

@@ -8,6 +8,7 @@ add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 # Vulkan SDK 通过 find_package 定位，不把某一台机器的安装路径写死。
 # 如果 CMake 找不到，可设置环境变量 VULKAN_SDK，或传 -DVulkan_ROOT=<SDK 根目录>。
 find_package(Vulkan REQUIRED)
+find_package(Threads REQUIRED)
 
 set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glfw")
 set(GLM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glm")
@@ -25,6 +26,12 @@ if(NOT EXISTS "${TINYGLTF_DIR}/tiny_gltf.h" OR NOT EXISTS "${TINYGLTF_DIR}/json.
     message(FATAL_ERROR
         "缺少 tinygltf/json.hpp。请执行：\n"
         "  git clone --depth 1 https://github.com/syoyo/tinygltf.git \"${TINYGLTF_DIR}\"")
+endif()
+
+# EnTT 用 src/ 作为 include 根，代码里写 #include <entt/entt.hpp>。
+if(NOT EXISTS "${ENTT_DIR}/src/entt/entt.hpp")
+    message(FATAL_ERROR
+        "缺少 EnTT。请下载 v3.16.0（C++17 兼容）并放到 \"${ENTT_DIR}\"。")
 endif()
 
 # GLFW：优先使用 3rdParty/glfw 自带源码，避免依赖机器上是否安装过 glfw3。
@@ -62,7 +69,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${GLFW_DIR}/include"
     "${TINYOBJ_DIR}"
     "${TINYGLTF_DIR}"
-    "${ENTT_DIR}"
+    "${ENTT_DIR}/src"
     "${SPDLOG_DIR}"
     "${STB_DIR}"
     "${IMGUI_DIR}"
@@ -121,6 +128,7 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Vulkan::Vulkan 
     glfw
+    Threads::Threads
 )
 
 # shader 编译器同样由 Vulkan SDK 的 CMake 包给出，避免第二处硬编码路径。

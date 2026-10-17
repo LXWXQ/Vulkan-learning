@@ -8,9 +8,20 @@
 
 ## 0. 一句话状态
 
-**家庭工作区：D-4 / D-5 已完成（本地未提交）。2 帧在飞 + graphics/compute 双 timeline；compute probe 已验证 GPU 写 / CPU 读回；四种自检组合各跑 120 帧，stderr 全部 0 字节。**
+**家庭工作区：D-4 / D-5 已提交（`cd7d695`），D-6 Job System + D-7 EnTT ECS 已完成（本地未提交）。2 帧在飞 + 异步 compute + CPU worker pool + EnTT 场景/Transform 层级/空间索引；四种渲染自检组合各跑 120 帧，stderr 全部 0 字节。**
 
-> 当前 HEAD 仍是原仓库的 `0010689 (refactor)`；本机适配与 D-4 / D-5 改动都在工作区，尚未 commit。
+> 当前 HEAD 是 `cd7d695`（D-4 / D-5）；D-6 / D-7 改动在工作区，尚未 commit。
+
+## 0.1 新对话入口（优先读这里）
+
+从新对话接手时，按顺序读：
+
+1. **`TECH_DEBT.md`** —— 当前真正要解决的问题与优先级，本文档现在是技术债主清单。
+2. `FUTURE_PLAN.md` —— 地形 / 体素 / GPU-driven rendering 等未来主功能，不要和当前技术债混在一起。
+3. 本文件 —— 当前基线、已完成里程碑和历史交接信息。
+4. `AI_Readme.md` / `ARCHITECTURE.md` —— 深入手册与设计文档。
+
+下一步工作不是继续加主功能，而是从 `TECH_DEBT.md` 的 **TD-01 -> TD-02** 开始。
 
 ```
 9cee23b  技术债：登记 D-3 自己引入的两条
@@ -122,7 +133,7 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 
 ---
 
-## 4. D-4：多帧并行 + timeline semaphore（已完成，本地未提交）
+## 4. D-4：多帧并行 + timeline semaphore（已完成，`cd7d695`）
 
 ### 4.1 实现结果
 
@@ -158,7 +169,7 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 - 正常窗口运行实测：`[Perf] 566 FPS | draw calls 104 | desc binds 1 | triangles 270459 | vertices 811377`。
 - 正常关窗退出路径已覆盖，配置正常保存。
 
-### 4.3 D-5：Compute + 异步计算队列（已完成，本地未提交）
+### 4.3 D-5：Compute + 异步计算队列（已完成，`cd7d695`）
 
 - `Device` 增加 compute queue family 选择：优先独立 compute family，没有则回退 graphics family；
   当前机器是 `graphics=0 present=2 compute=2`，属于独立异步计算队列。
@@ -180,13 +191,76 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 - `SENTINEL_SIMULATE_COMPUTE_SKIP=1` 能被 buffer 语义校验拦下。
 - 正常窗口运行实测 526 FPS（compute probe 固定开销约 36 FPS）。
 
-### 4.4 下一步
+### 4.4 D-6：作业系统（已完成，本地未提交）
 
-D-6：作业系统（Job System）。
+- 新增 `src/Core/JobSystem.h/.cpp`：
+  - 全局任务队列 + `std::thread` worker pool（默认 `hardware_concurrency - 1`）；
+  - `submit()` 返回可等待的 `JobHandle`；
+  - `parallelFor(begin,end,grain,fn)` 按 chunk 并行；
+  - worker 内嵌套 `parallelFor` 顺序退化，避免线程互相等待死锁；
+  - `JobHandle::wait()` 会把任务异常重新抛回调用线程。
+- `FirstApp` 启动时创建 JobSystem；`--selftest` 会先执行 JobSystem 自检。
+- 新增独立命令：`VulkanEngine.exe --jobtest`，不创建 Vulkan 窗口，只验证线程池。
+- 自检覆盖：
+  - 512 个独立 submit；
+  - `parallelFor(100000)` 结果逐元素校验；
+  - worker 内嵌套 parallelFor；
+  - 异常传播。
 
-## 5. 已登记的技术债（23 条，别重复发现）
+验证：
+- `--jobtest`：selfTest PASS，stderr 0 字节。
+- 四种渲染 selftest 组合各 120 帧：stderr 0 字节，JobSystem / compute probe 自检均通过。
+- 正常窗口运行实测 541 FPS。
 
-完整清单在 `AI_Readme.md` 第 12 节 + `ARCHITECTURE.md` 第 11 节。**这一轮自己引入/暴露的**是 17~22：
+> D-6 当前是基础设施：JobSystem 已可用，但地形 / 体素任务尚未接入。
+> 全局队列和 worker 内顺序退化足够先保证正确性；chunk 数量真正变大后再按 profile
+> 决定是否升级 work stealing / 任务依赖图。
+
+### 4.5 D-7：EnTT ECS + Transform 层级 + 空间索引（已完成，本地未提交）
+
+- 3rdParty/entt 切到 **v3.16.0**（C++17），CMake include root 改为 `3rdParty/entt/src`。
+- 删除手写 `GameObject`，场景改为 `entt::registry`：
+  - `TransformComponent` / `WorldTransformComponent`
+  - `HierarchyComponent`（parent + children）
+  - `MeshComponent` / `MaterialComponent`
+  - `RenderTagComponent`（isSkybox / isGrid）
+  - `BoundsComponent` / `WorldBoundsComponent`
+  - `CameraComponent` tag
+- Transform 层级：`Scene::setParent()` 维护 children、拒绝自环和循环；每帧按
+  `T * Ry * Rx * Rz * S` 计算 world matrix 和 normal matrix。
+- 空间索引：新增 `SpatialIndex` 均匀网格，世界 AABB 插入 -> broad-phase AABB 查询
+  -> 精确 frustum-AABB 测试；`GeometrySystem` 只遍历 `Scene::visibleEntities`。
+- 渲染接入：GeometrySystem 从 EnTT view 读取 mesh / world transform / material tag；
+  场景 draw calls 仍是 104，说明 Sponza + skybox 没被误剔除。
+- `Scene::selfTest()` 覆盖父子/孙节点世界变换传播和空间网格查询。
+
+验证：
+- `--jobtest` PASS，stderr 0 字节。
+- 四种渲染 selftest 组合各 120 帧，stderr 0 字节；
+  `[Scene] ECS/spatial selfTest PASS` 每轮都出现。
+- 正常窗口实测约 502 FPS，update CPU 约 125 us。
+- `[Perf] draw calls 104 | desc binds 1 | triangles 270459 | vertices 811377` 与 D-6 一致。
+- PrintWindow 截图确认画面与 ImGui 正常。
+
+> 当前限制：glTF 内部节点层级仍然在导入时烘焙到世界空间；D-7 提供的是
+> entity 级别的动态 Transform 层级。要把 Sponza 内部节点做成可动对象，
+> 还需要保留 glTF 节点/子网格实例层级。
+
+### 4.6 下一步
+
+当前不再按 D 里程碑继续推进，转入专门的技术债阶段。优先级与验收标准见
+`TECH_DEBT.md`：
+
+1. **TD-01**：依赖与验证脚本可复现。
+2. **TD-02**：compute/graphics 跨队列 producer/consumer 同步。
+3. **TD-03**：窗口缩放 / swapchain 重建。
+4. 后续按 `TECH_DEBT.md` 的 P1/P2 顺序处理。
+
+主功能路线（地形 / 体素 / GPU-driven rendering / 资产管线）见 `FUTURE_PLAN.md`。
+
+## 5. 已登记的技术债（25 条，别重复发现）
+
+完整清单在 `AI_Readme.md` 第 12 节 + `ARCHITECTURE.md` 第 11 节。**W / D-3 / D-5 / D-6 / D-7 引入或暴露的**是 17~25：
 
 | # | 内容 | 何时处理 |
 |---|---|---|
@@ -197,6 +271,8 @@ D-6：作业系统（Job System）。
 | 21 | bindless 的 `normalMaps` 数组绑了但没被采样（切线空间法线贴图仍有意关闭），256 材质白占 256 个描述符 | 启用切线法线贴图时 |
 | 22 | ~~运行期复用材质槽位会改写 GPU 可能正在读的数组项~~ → **D-4 已修**：`releaseMaterialSet()` 在归还前执行 `vkDeviceWaitIdle`。热路径要优化时再换 timeline 延迟回收。 | ✅ 已完成 |
 | 23 | **D-5 的异步 compute 尚不支持跨队列 producer/consumer**：compute 写、graphics 读（或反向）目前会被 RenderGraph 显式拒绝；GPU culling / 体素 indirect buffer 接入前必须补 ownership + semaphore 调度 | 接入 GPU 剔除/体素生成前 |
+| 24 | **D-6 JobSystem 是正确性优先的基础版**：全局队列、无 work stealing、无任务依赖图、无取消；worker 内 nested parallelFor 顺序退化 | 地形/体素接入后按 profile 升级 |
+| 25 | **D-7 的 glTF 内部节点层级仍未保留**：导入时几何已烘焙到世界空间，entity 级 Transform 只能整体变换；且空间网格目前每帧重建、没有 dirty/增量更新 | 需要场景内局部动态物体 / 大规模地形 chunk 时 |
 
 > **17 是我明确不满意的那个交易**，不是"顺手记一下"。第 4 节开头提到的"D-4 顺带修 22"也是我主动提出的。
 
