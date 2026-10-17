@@ -43,6 +43,17 @@ public:
     CameraController& getCameraController() { return cameraController; }
     EngineSettings& getSettings() { return engineSettings; }
     RenderTelemetry& getTelemetry() { return currentTelemetry; }
+    const RenderTelemetry& getDisplayTelemetry() const { return displayTelemetry; }
+
+    // Called once at the start of a render frame, before the UI is built.
+    // The previous frame's counts are complete and safe to display while the
+    // current frame is still being recorded.
+    void beginFrameTelemetry()
+    {
+        displayTelemetry = currentTelemetry;
+        currentTelemetry.reset();
+    }
+
     MaterialSystem& getMaterialSystem() { return materialSystem; }
 
     // D-7 regression test: hierarchy transform propagation + uniform-grid query.
@@ -63,5 +74,6 @@ private:
 
     EngineSettings engineSettings;
     RenderTelemetry currentTelemetry;
+    RenderTelemetry displayTelemetry;
     MaterialSystem materialSystem;
 };

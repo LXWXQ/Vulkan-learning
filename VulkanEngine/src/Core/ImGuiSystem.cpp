@@ -70,7 +70,7 @@ void ImGuiSystem::prepareDrawData(FrameInfo& frameInfo)
 
 	ImGui::Begin("Sentinel Engine Core");
 
-	renderPerformancePanel(frameInfo.frameTime, frameInfo.telemetry, frameInfo.settings);
+	renderPerformancePanel(frameInfo.frameTime, frameInfo.displayTelemetry, frameInfo.settings);
 	renderSSAOPanel(frameInfo.settings);
 	renderLightingPanel(frameInfo.settings);
 	renderBloomPanel(frameInfo.settings);
@@ -94,7 +94,7 @@ void ImGuiSystem::discardFrame()
 	ImGui::EndFrame();
 }
 
-void ImGuiSystem::renderPerformancePanel(float dt, RenderTelemetry& telemetry, EngineSettings& settings)
+void ImGuiSystem::renderPerformancePanel(float dt, const RenderTelemetry& telemetry, EngineSettings& settings)
 {
 	if (!ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
@@ -171,6 +171,8 @@ void ImGuiSystem::renderCameraPanel(TransformComponent& cameraTransform, CameraC
 
 	const char* modeName = (controller->getMode() == CameraController::Mode::FPS) ? "FPS" : "Orbit";
 	ImGui::Text("Mode: %s  (RMB=FPS / MMB=Orbit)", modeName);
+ImGui::TextDisabled("WASD: move  |  Q/E: down/up  |  Shift: sprint");
+ImGui::TextDisabled("Hold RMB: look  |  Hold MMB: orbit  |  Wheel: speed/zoom");
 
 	ImGui::SliderFloat("Move Speed", &controller->moveSpeed, 0.5f, 50.0f, "%.1f");
 	ImGui::SliderFloat("Sprint Boost", &controller->sprintMultiplier, 1.5f, 10.0f, "%.1fx");

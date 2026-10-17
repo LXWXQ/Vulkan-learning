@@ -1,134 +1,190 @@
 #include "CameraController.h"
 #include <algorithm>
+#include <cmath>
 #include <glm/gtc/constants.hpp>
+
+namespace
+{
+constexpr float kMaxDeltaTime = 0.1f;
+constexpr float kPositionEpsilonSq = 1.0e-8f;
+constexpr float kRotationEpsilon = 1.0e-5f;
+
+// This camera's projection expects view-space +Z to be in front of the
+// camera. The camera's world-space forward is therefore +w, not -w.
+glm::vec3 cameraForward(float yaw, float pitch)
+{
+const float cosPitch = std::cos(pitch);
+return glm::vec3{
+std::sin(yaw) * cosPitch,
+-std::sin(pitch),
+std::cos(yaw) * cosPitch
+};
+}
+}
 
 void CameraController::setMode(Mode m)
 {
-	if (mode != m)
-		firstMouse = true;
-	mode = m;
+if (mode != m)
+firstMouse = true;
+mode = m;
+}
+
+void CameraController::applyExternalTransformEdits(const TransformComponent& cameraTransform)
+{
+if (!hasAppliedState)
+{
+smoothPosition = cameraTransform.translation;
+yaw = smoothYaw = cameraTransform.rotation.y;
+pitch = smoothPitch = glm::clamp(cameraTransform.rotation.x,
+-glm::half_pi<float>() + 0.01f, glm::half_pi<float>() - 0.01f);
+focusPoint = smoothPosition + cameraForward(smoothYaw, smoothPitch) * distance;
+hasAppliedState = true;
+return;
+}
+
+const glm::vec3 positionDelta = cameraTransform.translation - lastAppliedPosition;
+const bool positionEdited = glm::dot(positionDelta, positionDelta) > kPositionEpsilonSq;
+const bool yawEdited = std::abs(cameraTransform.rotation.y - lastAppliedYaw) > kRotationEpsilon;
+const bool pitchEdited = std::abs(cameraTransform.rotation.x - lastAppliedPitch) > kRotationEpsilon;
+
+// The ImGui camera panel may edit the transform between frames. Adopt
+// those values so the controller does not snap the camera back to stale
+// internal state.
+if (positionEdited)
+smoothPosition = cameraTransform.translation;
+if (yawEdited)
+yaw = smoothYaw = cameraTransform.rotation.y;
+if (pitchEdited)
+pitch = smoothPitch = glm::clamp(cameraTransform.rotation.x,
+-glm::half_pi<float>() + 0.01f, glm::half_pi<float>() - 0.01f);
+
+if (positionEdited || yawEdited || pitchEdited)
+focusPoint = smoothPosition + cameraForward(smoothYaw, smoothPitch) * distance;
 }
 
 void CameraController::processPCInput(GLFWwindow* window, float dt, TransformComponent& cameraTransform)
 {
-	bool rightPressed  = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT)  == GLFW_PRESS;
-	bool middlePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
-	bool dragging = rightPressed || middlePressed;
+applyExternalTransformEdits(cameraTransform);
 
-	if (rightPressed)
-		setMode(Mode::FPS);
-	else if (middlePressed)
-		setMode(Mode::Orbit);
+const bool rightPressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+const bool middlePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+const bool lookDragging = rightPressed || middlePressed;
 
-	if (!dragging)
-	{
-		glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-		firstMouse = true;
+if (rightPressed)
+setMode(Mode::FPS);
+else if (middlePressed)
+setMode(Mode::Orbit);
 
-		// 没有拖动时，把 transform 当作权威值同步回内部状态 ——
-		// ImGui 面板可以直接改 transform.translation / rotation，
-		// 如果不做这个同步，下一次按下鼠标时陈旧的 smooth* 会把镜头"拉回"旧位置。
-		smoothPosition = cameraTransform.translation;
-		yaw   = smoothYaw   = cameraTransform.rotation.y;
-		pitch = smoothPitch = glm::clamp(cameraTransform.rotation.x,
-			-glm::half_pi<float>() + 0.01f, glm::half_pi<float>() - 0.01f);
+if (lookDragging != cursorCaptured)
+{
+glfwSetInputMode(window, GLFW_CURSOR,
+lookDragging ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+cursorCaptured = lookDragging;
+firstMouse = true;
+}
 
-		// 同步轨道焦点，避免切到 Orbit 模式时镜头跳回旧焦点
-		const glm::vec3 fwd{ sin(smoothYaw) * cos(smoothPitch),
-			sin(smoothPitch),
-			cos(smoothYaw) * cos(smoothPitch) };
-		focusPoint = smoothPosition + fwd * distance;
-		return;
-	}
+if (lookDragging)
+{
+double mouseX = 0.0;
+double mouseY = 0.0;
+glfwGetCursorPos(window, &mouseX, &mouseY);
 
-	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+if (firstMouse)
+{
+lastMouseX = mouseX;
+lastMouseY = mouseY;
+firstMouse = false;
+}
 
-	double mx, my;
-	glfwGetCursorPos(window, &mx, &my);
-	if (firstMouse)
-	{
-		lastMouseX = mx;
-		lastMouseY = my;
-		firstMouse = false;
-	}
+const float dx = static_cast<float>(mouseX - lastMouseX);
+const float dy = static_cast<float>(mouseY - lastMouseY);
+lastMouseX = mouseX;
+lastMouseY = mouseY;
 
-	float dx = static_cast<float>(mx - lastMouseX);
-	float dy = static_cast<float>(my - lastMouseY);
-	lastMouseX = mx;
-	lastMouseY = my;
+const float sensitivity = (mode == Mode::FPS) ? lookSensitivity : lookSensitivity * 0.5f;
+yaw += dx * sensitivity;
+pitch += dy * sensitivity;
+pitch = glm::clamp(pitch, -glm::half_pi<float>() + 0.01f,
+glm::half_pi<float>() - 0.01f);
+}
+else
+{
+firstMouse = true;
+}
 
-	// Orbit 模式下视角转动减半，手感更稳
-	const float sensitivity = (mode == Mode::FPS) ? lookSensitivity : lookSensitivity * 0.5f;
-	yaw   -= dx * sensitivity;
-	pitch -= dy * sensitivity;
-	pitch = glm::clamp(pitch, -glm::half_pi<float>() + 0.01f, glm::half_pi<float>() - 0.01f);
+const float frameTime = std::clamp(dt, 0.0f, kMaxDeltaTime);
+const float smoothing = smoothEnabled
+? 1.0f - std::exp(-std::max(smoothFactor, 0.001f) * frameTime)
+: 1.0f;
+smoothYaw += (yaw - smoothYaw) * smoothing;
+smoothPitch += (pitch - smoothPitch) * smoothing;
 
-	float effectiveSpeed = moveSpeed;
-	if (glfwGetKey(window, keys.sprint) == GLFW_PRESS)
-		effectiveSpeed *= sprintMultiplier;
+if (mode == Mode::FPS)
+{
+// W/S follow the full view direction (including pitch), so looking up
+// and moving forward also moves upward. A/D remain horizontal strafes,
+// while Q/E provide explicit world-space vertical movement.
+const glm::vec3 forward = cameraForward(smoothYaw, smoothPitch);
+const glm::vec3 right{ std::cos(smoothYaw), 0.0f, -std::sin(smoothYaw) };
+const glm::vec3 worldUp{ 0.0f, 1.0f, 0.0f };
 
-	// 阻尼插值：smoothEnabled 关闭时 t = 1，等价于直接使用原始值。
-	// 注意这里每一帧都会收敛，所以松开鼠标之后镜头依然会平滑到位
-	//（原实现只在按住鼠标时更新，松开后 smooth* 永远停在中途，下次拖动会跳一下）。
-	const float t = smoothEnabled ? (1.0f - glm::exp(-smoothFactor * dt)) : 1.0f;
-	smoothYaw   += (yaw - smoothYaw) * t;
-	smoothPitch += (pitch - smoothPitch) * t;
+glm::vec3 moveDirection{ 0.0f };
+if (glfwGetKey(window, keys.moveForward) == GLFW_PRESS)  moveDirection += forward;
+if (glfwGetKey(window, keys.moveBackward) == GLFW_PRESS) moveDirection -= forward;
+if (glfwGetKey(window, keys.moveRight) == GLFW_PRESS)    moveDirection += right;
+if (glfwGetKey(window, keys.moveLeft) == GLFW_PRESS)     moveDirection -= right;
+if (glfwGetKey(window, keys.moveUp) == GLFW_PRESS)       moveDirection += worldUp;
+if (glfwGetKey(window, keys.moveDown) == GLFW_PRESS)     moveDirection -= worldUp;
 
-	glm::vec3 forward{ sin(smoothYaw) * cos(smoothPitch),
-		sin(smoothPitch),
-		cos(smoothYaw) * cos(smoothPitch) };
-	glm::vec3 right{ forward.z, 0.0f, -forward.x };
-	glm::vec3 up{ 0.0f, -1.0f, 0.0f };
+float effectiveSpeed = moveSpeed;
+if (glfwGetKey(window, keys.sprint) == GLFW_PRESS)
+effectiveSpeed *= sprintMultiplier;
 
-	if (mode == Mode::FPS)
-	{
-		glm::vec3 moveDir{ 0.0f };
-		if (glfwGetKey(window, keys.moveForward)  == GLFW_PRESS) moveDir += forward;
-		if (glfwGetKey(window, keys.moveBackward) == GLFW_PRESS) moveDir -= forward;
-		if (glfwGetKey(window, keys.moveRight)    == GLFW_PRESS) moveDir += right;
-		if (glfwGetKey(window, keys.moveLeft)     == GLFW_PRESS) moveDir -= right;
-		if (glfwGetKey(window, keys.moveUp)       == GLFW_PRESS) moveDir += up;
-		if (glfwGetKey(window, keys.moveDown)     == GLFW_PRESS) moveDir -= up;
+// Normalizing the combined direction prevents diagonal movement from
+// being faster than cardinal movement.
+if (glm::dot(moveDirection, moveDirection) > 0.0001f)
+smoothPosition += glm::normalize(moveDirection) * effectiveSpeed * frameTime;
 
-		if (glm::dot(moveDir, moveDir) > 0.0001f)
-			smoothPosition += effectiveSpeed * dt * glm::normalize(moveDir);
+focusPoint = smoothPosition + cameraForward(smoothYaw, smoothPitch) * distance;
+}
+else
+{
+smoothPosition = focusPoint - cameraForward(smoothYaw, smoothPitch) * distance;
+}
 
-		focusPoint = smoothPosition + forward * distance;
-	}
-	else
-	{
-		smoothPosition = focusPoint - forward * distance;
-	}
-
-	// 写回"实际使用的"已平滑值，保证 ImGui 显示的数字和画面一致
-	cameraTransform.translation = smoothPosition;
-	cameraTransform.rotation = { smoothPitch, smoothYaw, 0.0f };
+// Write back the actually rendered state. The next frame can then tell
+// controller updates apart from external edits.
+cameraTransform.translation = smoothPosition;
+cameraTransform.rotation = { smoothPitch, smoothYaw, 0.0f };
+lastAppliedPosition = cameraTransform.translation;
+lastAppliedYaw = cameraTransform.rotation.y;
+lastAppliedPitch = cameraTransform.rotation.x;
 }
 
 void CameraController::onScroll(double, double yoffset)
 {
-	if (mode == Mode::Orbit)
-	{
-		distance -= static_cast<float>(yoffset) * scrollSpeed * 0.1f;
-		distance = glm::clamp(distance, minDistance, maxDistance);
-	}
-	else
-	{
-		moveSpeed += static_cast<float>(yoffset) * 2.0f;
-		moveSpeed = glm::clamp(moveSpeed, 0.5f, 50.0f);
-	}
+if (mode == Mode::Orbit)
+{
+distance -= static_cast<float>(yoffset) * scrollSpeed * 0.1f;
+distance = glm::clamp(distance, minDistance, maxDistance);
+}
+else
+{
+moveSpeed += static_cast<float>(yoffset) * 2.0f;
+moveSpeed = glm::clamp(moveSpeed, 0.5f, 50.0f);
+}
 }
 
 static CameraController* s_activeController = nullptr;
 
 static void scrollCallback(GLFWwindow*, double x, double y)
 {
-	if (s_activeController)
-		s_activeController->onScroll(x, y);
+if (s_activeController)
+s_activeController->onScroll(x, y);
 }
 
 void CameraController::registerCallbacks(GLFWwindow* window)
 {
-	s_activeController = this;
-	glfwSetScrollCallback(window, scrollCallback);
+s_activeController = this;
+glfwSetScrollCallback(window, scrollCallback);
 }

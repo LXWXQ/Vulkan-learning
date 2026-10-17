@@ -813,7 +813,7 @@ void FirstApp::render(float dt)
 	SENTINEL_ZONE_SCOPED("render");
 	if (auto commandBuffer = renderer->beginFrame())
 	{
-		scene->getTelemetry().reset();
+		scene->beginFrameTelemetry();
 
 		// P1-2：到达目标帧时请求 RenderDoc 抓帧。
 		if (renderDoc.shouldCapture(renderer->getFrameNumber()))
@@ -845,6 +845,7 @@ void FirstApp::render(float dt)
 			commandBuffer,
 			scene->getSettings(),
 			scene->getTelemetry(),
+			scene->getDisplayTelemetry(),
 			scene->getRegistry(),
 			scene->getVisibleEntities(),
 			scene->getCamera().getProjection(),

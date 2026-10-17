@@ -214,7 +214,12 @@ void Scene::init(Device& device, VkCommandPool commandPool, DescriptorManager& d
                   << ") center(" << center.x << ", " << center.y << ", " << center.z
                   << ") radius " << radius << "\n";
 
-        getCameraTransform().translation = center - glm::vec3(0.0f, 0.0f, radius * 1.6f);
+        // Default establishing shot for Sponza. The camera sits inside the
+        // central aisle and looks down its long axis; config/engine.json can
+        // still override this pose at runtime.
+        TransformComponent& cameraTransform = getCameraTransform();
+        cameraTransform.translation = { -4.6485233f, 5.2119632f, 0.0523994f };
+        cameraTransform.rotation = { 0.3507974f, -17.3302765f, 0.0f };
     }
     else
     {

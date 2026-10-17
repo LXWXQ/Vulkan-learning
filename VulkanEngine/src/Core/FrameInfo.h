@@ -157,6 +157,9 @@ VkCommandBuffer commandBuffer;
 
 	EngineSettings& settings;
 	RenderTelemetry& telemetry;
+	// ImGui is built before the render graph executes, so performance counters
+	// shown in the UI come from the last fully recorded frame.
+	const RenderTelemetry& displayTelemetry;
 	entt::registry& registry;
 	const std::vector<entt::entity>& visibleEntities;
 

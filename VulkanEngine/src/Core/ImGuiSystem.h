@@ -28,7 +28,7 @@ public:
 	void discardFrame();
 
 private:
-	void renderPerformancePanel(float dt, RenderTelemetry& telemetry, EngineSettings& settings);
+	void renderPerformancePanel(float dt, const RenderTelemetry& telemetry, EngineSettings& settings);
 	void renderSSAOPanel(EngineSettings& settings);
 	void renderLightingPanel(EngineSettings& settings);
 	void renderBloomPanel(EngineSettings& settings);
