@@ -17,6 +17,14 @@ public:
         for (auto& pass : passes) pass->init();
     }
 
+    // Pass registration order matters: Geometry updates imported G-Buffer
+    // views, then SSAO/Lighting resize their targets, then Bloom/Present rewrite
+    // descriptors that reference those targets.
+    void resizeAll(VkExtent2D extent)
+    {
+        for (auto& pass : passes) pass->resize(extent);
+    }
+
     // 显式销毁所有 Pass。之所以不依赖成员的自动析构：
     // Pass 里持有 VMA 分配（SSAO 的 UBO 等），而销毁顺序一旦排错，
     // 这些分配就会活到 vmaDestroyAllocator 之后，触发 VMA 的断言崩溃

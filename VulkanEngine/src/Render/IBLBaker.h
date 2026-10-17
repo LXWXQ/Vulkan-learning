@@ -52,11 +52,9 @@ private:
     };
 
     void createTargets();
-    void createRenderPasses();
     void createDescriptors(Texture& equirectEnv);
     void createPipelines();
 
-    VkFramebuffer makeFramebuffer(VkRenderPass pass, VkImageView view, uint32_t size);
     void transitionImageRange(VkCommandBuffer cmd, VkImage image, uint32_t baseMip, uint32_t mipCount,
                               uint32_t layerCount,
                               VkImageLayout oldLayout, VkImageLayout newLayout,
@@ -70,12 +68,6 @@ private:
                      VkPipelineLayout layout, VkDescriptorSet set,
                      int32_t sampleCount, float sourceFaceSize, bool perMipRoughness);
     void renderBrdfLut(VkCommandBuffer cmd);
-
-    // 烘焙期间创建的 Framebuffer。
-    // 注意：不能在录制完就销毁 —— 命令缓冲只是"录进去"了，还没提交执行，
-    // 此时销毁 Framebuffer 会让 vkCmdBeginRenderPass 指向已销毁对象（验证层刷屏）。
-    // 统一攒起来，等 cmdEndSingleTime（内部 vkQueueWaitIdle）之后再释放。
-    std::vector<VkFramebuffer> pendingFramebuffers;
 
     void recordEquirectToCube(VkCommandBuffer cmd);
     void recordEnvCubeMips(VkCommandBuffer cmd);
@@ -93,9 +85,6 @@ private:
     VmaAllocation brdfLutAllocation = VK_NULL_HANDLE;
     VkImageView brdfLutView = VK_NULL_HANDLE;
     VkSampler brdfLutSampler = VK_NULL_HANDLE;
-
-    VkRenderPass cubeRenderPass = VK_NULL_HANDLE;
-    VkRenderPass lutRenderPass  = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout srcSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;

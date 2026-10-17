@@ -17,6 +17,12 @@
 #include <chrono>
 #include <array>
 
+class ComputeProbePass;
+class CrossQueueProbePass;
+class PresentPass;
+class SSAOPass;
+class SubresourceProbePass;
+
 class FirstApp
 {
 public:
@@ -36,6 +42,15 @@ public:
 	// 这样这些分支也能进"零验证层输出"的回归检查。
 	void setBloomEnabled(bool enabled);
 	void setSSAOEnabled(bool enabled);
+	void setCrossQueueTestEnabled(bool enabled);
+	void setResizeTestEnabled(bool enabled);
+	void setMaterialStressEnabled(bool enabled);
+	void setSubresourceTestEnabled(bool enabled);
+	void setComputeProbeEnabled(bool enabled);
+	int  runSubresourceErrorSelfTest();
+	// TD-03 dynamic-resolution interface: change intermediate render targets
+	// without recreating pipelines or the swapchain.
+	void setRenderScale(float scale);
 	int  runHeadlessSelfTest(int frames);
 
 	// W1：配置存取。ImGui 面板上的 Save/Load 按钮走这里 ——
@@ -52,6 +67,12 @@ private:
 
 	void update(float dt);
 	void render(float dt);
+	bool handleWindowMaintenance();
+	void recreateSwapchain(VkExtent2D framebufferExtent);
+	void recreateRenderTargets(VkExtent2D renderExtent);
+	void rebuildGlobalDescriptors();
+	VkExtent2D getDesiredRenderExtent() const;
+	void materialStressStep();
 
 	GLFWwindow* window = nullptr;
 	std::unique_ptr<Device> vulkanDevice;
@@ -63,6 +84,11 @@ private:
 	std::unique_ptr<JobSystem> jobSystem;
 	std::unique_ptr<ImGuiSystem> imguiSystem;
 	std::unique_ptr<IBLBaker> iblBaker;
+	ComputeProbePass* computeProbePassPtr = nullptr;
+	CrossQueueProbePass* crossQueueProbePassPtr = nullptr;
+	SubresourceProbePass* subresourceProbePassPtr = nullptr;
+	PresentPass* presentPassPtr = nullptr;
+	SSAOPass* ssaoPassPtr = nullptr;
 
 	RenderPipeline renderPipeline;
 
@@ -86,4 +112,11 @@ private:
 	// 自检会故意把 bloom/ssao 关掉，如果照常自动保存，一次回归跑下来
 	// 就把用户调好的配置改成了"全关"。所以自检模式下禁掉退出自动保存。
 	bool suppressAutoSave = false;
+	bool resizeTestEnabled = false;
+	bool materialStressEnabled = false;
+	uint32_t materialStressPendingSlot = kInvalidMaterialSlot;
+	uint32_t materialStressCycles = 0;
+	uint32_t materialStressBaselineUsed = 0;
+	uint32_t materialStressMaxPending = 0;
+	VkExtent2D currentRenderExtent{};
 };

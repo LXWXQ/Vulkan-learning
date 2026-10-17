@@ -1,3 +1,7 @@
 # 配置文件在保存时先写 .tmp 再 rename（防止写到一半崩溃留下坏配置）。
 # 正常情况下不会残留，但进程被强杀时可能留下，不该进版本库。
 config/*.tmp
+
+# TD-09 migration backups are user-local recovery artifacts.
+config/*.bak
+config/*.bak.*

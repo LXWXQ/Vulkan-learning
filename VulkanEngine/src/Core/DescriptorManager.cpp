@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <string>
+#include <utility>
 
 void DescriptorManager::init(Device& dev, uint32_t maxMaterials)
 {
@@ -23,11 +24,15 @@ void DescriptorManager::init(Device& dev, uint32_t maxMaterials)
 		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxMaterials * 4 + 96 },
 		// D-5：compute pass 的 SSBO。数量很小，但要显式计入，否则
 		// ComputeProbePass 在 vkAllocateDescriptorSets 时会直接失败。
-		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         64 }
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         64 },
+		// TD-02：graphics/compute 跨队列探针会读写 storage image。
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          16 }
 	};
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	// TD-04: required for descriptor arrays marked UPDATE_AFTER_BIND.
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 	poolInfo.maxSets = maxMaterials + 64;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
@@ -43,7 +48,8 @@ void DescriptorManager::init(Device& dev, uint32_t maxMaterials)
 	// 用 VARIABLE_DESCRIPTOR_COUNT 让数组长度在**分配时**决定，而不是写死在布局里。
 	// 好处：想调材质容量只需改 init 的 maxMaterials，布局不用动，
 	// 也不用为不同容量维护多套布局。
-	slotInUse.resize(maxMaterials, false);
+	slotInUse.assign(maxMaterials, false);
+	slotPendingRelease.assign(maxMaterials, false);
 	freeSlots.reserve(maxMaterials);
 
 	VkDescriptorSetVariableDescriptorCountAllocateInfo variableCount{};
@@ -74,7 +80,12 @@ void DescriptorManager::cleanup()
 {
 	// VkDescriptorSet 会随描述符池一起销毁，这里只需要清掉索引表
 	slotInUse.clear();
+	slotPendingRelease.clear();
 	freeSlots.clear();
+	deferredMaterialReleases.clear();
+	completedFrameQuery = nullptr;
+	frameWait = nullptr;
+	lastSubmittedFrameQuery = nullptr;
 	globalSets.clear();
 	materialSet = VK_NULL_HANDLE;
 	materialCapacity = 0;
@@ -139,7 +150,8 @@ void DescriptorManager::createMaterialLayout(uint32_t capacity)
 	// 允许部分绑定，避免必须把所有槽位先填一张占位图。
 	// 这个标志是"每个 binding 各自算"的，所以四个都要加。
 	std::vector<VkDescriptorBindingFlags> flags(bindings.size(),
-		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 	flags.back() |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
@@ -164,6 +176,7 @@ void DescriptorManager::createMaterialLayout(uint32_t capacity)
 	layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
 	layoutInfo.pBindings = bindings.data();
 	layoutInfo.pNext = &flagsInfo;
+	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 
 	if (vkCreateDescriptorSetLayout(device->getDevice(), &layoutInfo, nullptr, &materialSetLayout) != VK_SUCCESS)
 		throw std::runtime_error("DescriptorManager: bindless 材质布局创建失败");
@@ -191,11 +204,16 @@ void DescriptorManager::buildGlobalSet(
 	const VkDescriptorImageInfo& prefilteredInfo,
 	const VkDescriptorImageInfo& brdfLutInfo)
 {
-	globalSets.resize(kFramesInFlight, VK_NULL_HANDLE);
-
+	// TD-03: rebuild in place so repeated resizes do not exhaust the descriptor pool.
+	if (globalSets.size() != kFramesInFlight)
+	{
+		globalSets.clear();
+		globalSets.resize(kFramesInFlight, VK_NULL_HANDLE);
+	}
 	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
 	{
-		globalSets[frame] = allocateSet(globalSetLayout);
+		if (globalSets[frame] == VK_NULL_HANDLE)
+			globalSets[frame] = allocateSet(globalSetLayout);
 
 		VkDescriptorBufferInfo uboInfo{ uboBuffers[frame], 0, sizeof(GlobalUbo) };
 		const GBuffer& gBuffer = *gBuffers[frame];
@@ -241,18 +259,61 @@ void DescriptorManager::buildGlobalSet(
 	}
 }
 
+void DescriptorManager::setFrameTimelineCallbacks(std::function<uint64_t()> completed,
+	std::function<void(uint64_t)> waitUntil,
+	std::function<uint64_t()> lastSubmitted)
+{
+	completedFrameQuery = std::move(completed);
+	frameWait = std::move(waitUntil);
+	lastSubmittedFrameQuery = std::move(lastSubmitted);
+}
+
+void DescriptorManager::reclaimReleasedMaterialSlots()
+{
+	if (deferredMaterialReleases.empty())
+		return;
+
+	const uint64_t completed = completedFrameQuery ? completedFrameQuery() : 0;
+	while (!deferredMaterialReleases.empty() &&
+		deferredMaterialReleases.front().safeAfterFrame <= completed)
+	{
+		const uint32_t slot = deferredMaterialReleases.front().slot;
+		deferredMaterialReleases.pop_front();
+		slotInUse[slot] = false;
+		slotPendingRelease[slot] = false;
+		freeSlots.push_back(slot);
+	}
+}
+
+void DescriptorManager::collectMaterialGarbage()
+{
+	reclaimReleasedMaterialSlots();
+}
+
 uint32_t DescriptorManager::allocateMaterialSet(const VkDescriptorImageInfo& albedo,
 	const VkDescriptorImageInfo& normal,
 	const VkDescriptorImageInfo& metallic,
 	const VkDescriptorImageInfo& roughness)
 {
+	reclaimReleasedMaterialSlots();
+
+	// If every slot is quarantined, wait only for the oldest graphics submission
+	// that could still reference them. This is much narrower than a device wait.
+	if (freeSlots.empty() && !deferredMaterialReleases.empty())
+	{
+		if (frameWait)
+			frameWait(deferredMaterialReleases.front().safeAfterFrame);
+		reclaimReleasedMaterialSlots();
+	}
+
 	if (freeSlots.empty())
 		throw std::runtime_error("DescriptorManager: material slots exhausted! capacity = "
-			+ std::to_string(materialCapacity));
+		+ std::to_string(materialCapacity));
 
 	const uint32_t slot = freeSlots.back();
 	freeSlots.pop_back();
 	slotInUse[slot] = true;
+	slotPendingRelease[slot] = false;
 
 	writeMaterialSet(slot, albedo, normal, metallic, roughness);
 	return slot;
@@ -260,19 +321,18 @@ uint32_t DescriptorManager::allocateMaterialSet(const VkDescriptorImageInfo& alb
 
 void DescriptorManager::releaseMaterialSet(uint32_t index)
 {
-	if (index >= slotInUse.size() || !slotInUse[index])
-		return;                 // 越界或重复归还：安全忽略
+	if (index >= slotInUse.size() || !slotInUse[index] || slotPendingRelease[index])
+		return;   // out of range, duplicate release, or already queued
 
-	// D-4 的保险：归还槽位意味着下一次 allocate 可能立刻改写 GPU 可能仍在
-	// 采样的数组项。当前没有运行期归还调用方；这里用一次 device-wide wait
-	// 保证安全，避免将来动态加载材质时出现随机贴图错乱。
-	// 热路径若真的需要回收，应改成基于 timeline semaphore 的延迟回收队列。
-	if (device != nullptr && device->getDevice() != VK_NULL_HANDLE)
-		vkDeviceWaitIdle(device->getDevice());
+	slotPendingRelease[index] = true;
+	const uint64_t safeAfter = lastSubmittedFrameQuery ? lastSubmittedFrameQuery() : 0;
+	deferredMaterialReleases.push_back({ index, safeAfter });
 
-	slotInUse[index] = false;
-	freeSlots.push_back(index);
+	// In boot/init paths there may be no submitted work at all; reclaim immediately.
+	reclaimReleasedMaterialSlots();
 }
+
+
 
 void DescriptorManager::writeMaterialSet(uint32_t slot,
 	const VkDescriptorImageInfo& albedo,

@@ -37,6 +37,7 @@
       "shadowEnabled": false,
       "ssrEnabled": false
     },
+    "renderScale": 1.0,
     "ssao": {
       "bias": 0.02500000037252903,
       "enabled": true,
@@ -45,5 +46,5 @@
     },
     "windowTitle": "Vulkan Engine - Sentinel"
   },
-  "version": 1
+  "version": 2
 }

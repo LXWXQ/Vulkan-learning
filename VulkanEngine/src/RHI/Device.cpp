@@ -226,6 +226,11 @@ void Device::createLogicalDevice()
             "GPU 不支持 dynamicRendering / synchronization2；本引擎面向 Vulkan 1.3 桌面。");
     }
 
+    // TD-02：graphics 阶段需要通过 storage buffer / storage image 消费
+    // compute 产物（GPU culling / indirect draw 的同类路径）。
+    if (!supportedFeatures.features.fragmentStoresAndAtomics)
+        throw std::runtime_error("GPU 不支持 fragmentStoresAndAtomics；无法在 fragment shader 写 SSBO/storage image。");
+
     // ---- D-3 bindless 需要的 1.2 次特性 ----
     // 只启真正必需的，不做"看到支持就全开"——每多开一个都要在这里写清用途，
     // 否则将来没人知道某个特性为什么是开的。
@@ -233,13 +238,14 @@ void Device::createLogicalDevice()
         !supported12.shaderSampledImageArrayNonUniformIndexing ||
         !supported12.descriptorBindingPartiallyBound ||
         !supported12.runtimeDescriptorArray ||
-        !supported12.descriptorBindingVariableDescriptorCount)
+        !supported12.descriptorBindingVariableDescriptorCount ||
+        !supported12.descriptorBindingSampledImageUpdateAfterBind)
     {
         throw std::runtime_error(
             "GPU 不支持 bindless 所需的 descriptorIndexing 次特性"
             "（descriptorIndexing / shaderSampledImageArrayNonUniformIndexing / "
             "descriptorBindingPartiallyBound / runtimeDescriptorArray / "
-            "descriptorBindingVariableDescriptorCount）。");
+            "descriptorBindingVariableDescriptorCount / descriptorBindingSampledImageUpdateAfterBind）。");
     }
 
     // D-4：多帧在飞需要按数值等待某一帧的 GPU 工作完成。
@@ -261,6 +267,9 @@ void Device::createLogicalDevice()
     // 注意这是一个**独立于 runtimeDescriptorArray 的开关** —— 少了它，
     // 布局里带 VARIABLE_DESCRIPTOR_COUNT_BIT 会被验证层直接拒绝。
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    // TD-04: allow material descriptor array entries to be refreshed while a
+    // previously recorded graphics submission still has the set bound.
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     // D-4：用 timeline semaphore 追踪每个 frame slot 的 GPU 完成进度。
     features12.timelineSemaphore = VK_TRUE;
 
@@ -274,6 +283,7 @@ void Device::createLogicalDevice()
     // 否则两条路径同时启用特性是非法用法（VUID-VkDeviceCreateInfo-pNext-04748）。
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
+    deviceFeatures.fragmentStoresAndAtomics = VK_TRUE;
 
     VkPhysicalDeviceFeatures2 enabledFeatures{};
     enabledFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;

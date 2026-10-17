@@ -19,7 +19,10 @@ public:
 
     // 核心接口：控制帧的生命周期
     VkCommandBuffer beginFrame();
-    void endFrame();
+    // TD-02：跨队列依赖方向来自 RenderGraph::getCrossQueueDependencies()。
+    // 两个参数同时为 true 表示同一帧出现双向依赖，直接报错。
+    void endFrame(bool graphicsWaitsForCompute = false,
+                  bool computeWaitsForGraphics = false);
 
     // D-4：两个索引必须分开。
     //   frameInFlightIndex -> 本帧独占的 CPU/GPU 资源槽位（UBO、瞬时图等）
@@ -27,6 +30,18 @@ public:
     uint32_t getCurrentImageIndex() const { return currentImageIndex; }
     uint32_t getCurrentFrameInFlightIndex() const { return currentFrameInFlightIndex; }
     uint64_t getFrameNumber() const { return frameCounter; }
+    uint64_t getLastSubmittedGraphicsFrame() const { return lastSubmittedGraphicsFrame; }
+
+    // TD-04: graphics timeline is monotonic. A completed value X means every
+    // graphics submission up to frame X has retired, which is exactly what the
+    // bindless material-slot retirement queue needs.
+    uint64_t getCompletedGraphicsFrame();
+    void waitForGraphicsFrame(uint64_t frameNumber);
+
+    // TD-03: acquire/present can report out-of-date or suboptimal. The app
+    // rebuilds the swapchain between frames, never in the middle of recording.
+    bool needsSwapchainRecreate() const { return swapchainRecreateRequested; }
+    void onSwapchainRecreated();
 
     VkCommandPool getCommandPool() const { return commandPool; }
     VkCommandPool getComputeCommandPool() const { return computeCommandPool; }
@@ -64,6 +79,8 @@ private:
     std::array<uint64_t, kFramesInFlight> computeSubmissionValues{};
 
     uint64_t frameCounter = 0;          // 1-based while a frame is being recorded
+    uint64_t lastSubmittedGraphicsFrame = 0;
     uint32_t currentImageIndex = 0;
     uint32_t currentFrameInFlightIndex = 0;
+    bool swapchainRecreateRequested = false;
 };

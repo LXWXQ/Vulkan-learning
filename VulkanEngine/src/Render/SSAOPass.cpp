@@ -289,6 +289,12 @@ void SSAOPass::createPipeline()
         SENTINEL_SHADER_DIR "fullscreen.vert.spv", SENTINEL_SHADER_DIR "ssao.frag.spv", config);
 }
 
+void SSAOPass::resize(VkExtent2D extent)
+{
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+        renderGraph.resizeOwnedTexture(resources.ssao[frame], extent);
+}
+
 void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     // 每帧上传 SSAO 参数

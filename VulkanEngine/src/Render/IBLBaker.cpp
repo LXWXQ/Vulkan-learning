@@ -5,7 +5,7 @@
 // prefilter 需要 6*128*128*~1.33 个纹素 × 1024 次 GGX 采样，CPU 上要几十秒。
 //
 // 全部烘焙在一条一次性命令缓冲里完成，中间用显式 barrier 串起来。
-// 因为是一次性初始化，Framebuffer 采取"用完即建/即毁"的简单策略。
+// D-1(b) 起使用 Vulkan 1.3 动态渲染，不再创建 VkRenderPass / VkFramebuffer。
 // ============================================================================
 
 #include "Render/IBLBaker.h"
@@ -17,65 +17,6 @@
 #include <iostream>
 #include <array>
 
-namespace
-{
-    constexpr VkPipelineStageFlags kColorOutStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-    // 离屏单颜色附件 RenderPass。
-    // 首尾布局都固定在 COLOR_ATTACHMENT_OPTIMAL —— 进出烘焙区的两次布局转换
-    // 由 IBLBaker 自己用 barrier 做，避免在 RenderPass 里隐式转换导致同步不清。
-    VkRenderPass createOffscreenRenderPass(VkDevice device, VkFormat format)
-    {
-        VkAttachmentDescription color{};
-        color.format = format;
-        color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorRef;
-
-        std::array<VkSubpassDependency, 2> deps{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-        deps[0].dstSubpass = 0;
-        deps[0].srcStageMask = kColorOutStage;
-        deps[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[0].dstStageMask = kColorOutStage;
-        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-        deps[1].srcSubpass = 0;
-        deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-        deps[1].srcStageMask = kColorOutStage;
-        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        deps[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-        VkRenderPassCreateInfo info{};
-        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        info.attachmentCount = 1;
-        info.pAttachments = &color;
-        info.subpassCount = 1;
-        info.pSubpasses = &subpass;
-        info.dependencyCount = static_cast<uint32_t>(deps.size());
-        info.pDependencies = deps.data();
-
-        VkRenderPass pass = VK_NULL_HANDLE;
-        if (vkCreateRenderPass(device, &info, nullptr, &pass) != VK_SUCCESS)
-            throw std::runtime_error("IBLBaker: RenderPass 创建失败");
-        return pass;
-    }
-}
-
 IBLBaker::IBLBaker(Device& device, VkCommandPool commandPool)
     : device(device), commandPool(commandPool)
 {
@@ -83,11 +24,6 @@ IBLBaker::IBLBaker(Device& device, VkCommandPool commandPool)
 
 IBLBaker::~IBLBaker()
 {
-    // 兜底：正常流程下 bake() 已经清空了这个列表
-    for (VkFramebuffer fb : pendingFramebuffers)
-        vkDestroyFramebuffer(device.getDevice(), fb, nullptr);
-    pendingFramebuffers.clear();
-
     equirectToCubePipeline.reset();
     irradiancePipeline.reset();
     prefilterPipeline.reset();
@@ -98,9 +34,6 @@ IBLBaker::~IBLBaker()
 
     if (descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device.getDevice(), descriptorPool, nullptr);
     if (srcSetLayout != VK_NULL_HANDLE)   vkDestroyDescriptorSetLayout(device.getDevice(), srcSetLayout, nullptr);
-
-    if (cubeRenderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device.getDevice(), cubeRenderPass, nullptr);
-    if (lutRenderPass != VK_NULL_HANDLE)  vkDestroyRenderPass(device.getDevice(), lutRenderPass, nullptr);
 
     if (brdfLutSampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), brdfLutSampler, nullptr);
     if (brdfLutView != VK_NULL_HANDLE)    vkDestroyImageView(device.getDevice(), brdfLutView, nullptr);
@@ -157,12 +90,6 @@ void IBLBaker::createTargets()
               << ")  irradiance " << kIrradianceSize
               << "  prefiltered " << kPrefilterSize << "(mips " << kPrefilterMips
               << ")  brdfLut " << kBrdfLutSize << "\n";
-}
-
-void IBLBaker::createRenderPasses()
-{
-    // D-1(b) 起改用 Vulkan 1.3 动态渲染：烘焙不再需要 VkRenderPass / VkFramebuffer。
-    // 保留成空函数是为了不动 bake() 里的调用顺序。
 }
 
 void IBLBaker::createDescriptors(Texture& equirectEnv)
@@ -272,25 +199,6 @@ void IBLBaker::createPipelines()
         SENTINEL_SHADER_DIR "ibl_brdf_lut.frag.spv", lutCfg);
 
     std::cout << "[IBL] 4 条烘焙管线已就绪\n";
-}
-
-VkFramebuffer IBLBaker::makeFramebuffer(VkRenderPass pass, VkImageView view, uint32_t size)
-{
-    VkFramebufferCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    info.renderPass = pass;
-    info.attachmentCount = 1;
-    info.pAttachments = &view;
-    info.width = size;
-    info.height = size;
-    info.layers = 1;
-
-    VkFramebuffer fb = VK_NULL_HANDLE;
-    if (vkCreateFramebuffer(device.getDevice(), &info, nullptr, &fb) != VK_SUCCESS)
-        throw std::runtime_error("IBLBaker: Framebuffer 创建失败");
-
-    pendingFramebuffers.push_back(fb);
-    return fb;
 }
 
 void IBLBaker::transitionImage(VkCommandBuffer cmd, VkImage image, uint32_t mipLevels, uint32_t layerCount,
@@ -453,7 +361,6 @@ void IBLBaker::recordPrefilter(VkCommandBuffer cmd)
 void IBLBaker::bake(Texture& equirectEnv)
 {
     createTargets();
-    createRenderPasses();
     createDescriptors(equirectEnv);
     createPipelines();
 
@@ -513,11 +420,6 @@ void IBLBaker::bake(Texture& equirectEnv)
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, colorOut, frag);
 
     cmdEndSingleTime(device.getDevice(), device.getGraphicsQueue(), commandPool, cmd);
-
-    // 到这里 GPU 已经执行完毕（cmdEndSingleTime 内部 vkQueueWaitIdle），可以安全释放
-    for (VkFramebuffer fb : pendingFramebuffers)
-        vkDestroyFramebuffer(device.getDevice(), fb, nullptr);
-    pendingFramebuffers.clear();
 
     std::cout << "[IBL] 烘焙完成（irradiance / prefiltered / brdfLut）\n";
 }

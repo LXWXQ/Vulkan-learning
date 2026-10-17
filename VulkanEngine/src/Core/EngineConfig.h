@@ -36,6 +36,10 @@ public:
 	static bool load(EngineSettings& out);
 	static bool load(CameraState& out);
 
+	// TD-09 regression: explicit v0 -> v1 -> v2 migration, backup creation,
+	// and refusal to overwrite corrupt/future config files.
+	static bool selfTest();
+
 	static bool save(const EngineSettings& settings);
 	static bool save(const CameraState& camera);
 

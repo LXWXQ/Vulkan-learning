@@ -106,6 +106,22 @@ void Renderer::createSyncObjects()
         throw std::runtime_error("failed to create compute timeline semaphore!");
 }
 
+uint64_t Renderer::getCompletedGraphicsFrame()
+{
+    if (graphicsTimelineSemaphore == VK_NULL_HANDLE)
+        return 0;
+
+    uint64_t value = 0;
+    if (vkGetSemaphoreCounterValue(vulkanDevice.getDevice(), graphicsTimelineSemaphore, &value) != VK_SUCCESS)
+        throw std::runtime_error("failed to query graphics timeline semaphore!");
+    return value;
+}
+
+void Renderer::waitForGraphicsFrame(uint64_t frameNumber)
+{
+    waitForSemaphoreValue(graphicsTimelineSemaphore, frameNumber);
+}
+
 void Renderer::waitForSemaphoreValue(VkSemaphore semaphore, uint64_t value) const
 {
     if (value == 0)
@@ -139,9 +155,21 @@ VkCommandBuffer Renderer::beginFrame()
         acquireSemaphore, VK_NULL_HANDLE, &currentImageIndex);
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
-        throw std::runtime_error("swapchain out of date; window resize is not implemented yet");
+    {
+        // No image acquired and imageAvailableSemaphore was not signaled, so it
+        // is safe to return and let FirstApp recreate the swapchain next frame.
+        swapchainRecreateRequested = true;
+        return VK_NULL_HANDLE;
+    }
     if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR)
         throw std::runtime_error("failed to acquire swapchain image!");
+
+    if (acquireResult == VK_SUBOPTIMAL_KHR)
+    {
+        // Image is still usable. Draw/present this frame, then rebuild between
+        // frames so the imageAvailable semaphore is consumed normally.
+        swapchainRecreateRequested = true;
+    }
 
     VkCommandBuffer graphicsCommandBuffer = commandBuffers[currentFrameInFlightIndex];
     VkCommandBuffer computeCommandBuffer = computeCommandBuffers[currentFrameInFlightIndex];
@@ -161,8 +189,33 @@ VkCommandBuffer Renderer::beginFrame()
     return graphicsCommandBuffer;
 }
 
-void Renderer::endFrame()
+void Renderer::onSwapchainRecreated()
 {
+    // FirstApp has already waited for the whole device to become idle.
+    for (VkSemaphore& semaphore : renderFinishedSemaphores)
+    {
+        if (semaphore != VK_NULL_HANDLE)
+            vkDestroySemaphore(vulkanDevice.getDevice(), semaphore, nullptr);
+    }
+
+    VkSemaphoreCreateInfo binaryInfo{};
+    binaryInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    renderFinishedSemaphores.assign(vulkanSwapchain.imageCount(), VK_NULL_HANDLE);
+    for (VkSemaphore& semaphore : renderFinishedSemaphores)
+    {
+        if (vkCreateSemaphore(vulkanDevice.getDevice(), &binaryInfo, nullptr, &semaphore) != VK_SUCCESS)
+            throw std::runtime_error("failed to recreate render-finished semaphore!");
+    }
+
+    currentImageIndex = 0;
+    swapchainRecreateRequested = false;
+}
+
+void Renderer::endFrame(bool graphicsWaitsForCompute, bool computeWaitsForGraphics)
+{
+    if (graphicsWaitsForCompute && computeWaitsForGraphics)
+        throw std::runtime_error("Renderer: 同一帧不能同时要求 graphics 等 compute 和 compute 等 graphics");
+
     VkCommandBuffer graphicsCommandBuffer = commandBuffers[currentFrameInFlightIndex];
     VkCommandBuffer computeCommandBuffer = computeCommandBuffers[currentFrameInFlightIndex];
     const uint64_t signalValue = frameCounter;
@@ -171,18 +224,30 @@ void Renderer::endFrame()
         vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
         throw std::runtime_error("failed to end command buffers!");
 
-    // ---- 1) compute queue：独立 submit + 独立 timeline ----
-    // 当前 D-5 先支持「与 graphics 无资源依赖」的异步计算任务；RenderGraph 会在
-    // 检测到跨队列读写时抛错，避免这条 submit 变成静默数据竞争。
+    // ---- 提交函数：两条队列各自一条命令缓冲 ----
+    // TD-02 只允许单向依赖。依赖方向由 RenderGraph 根据资源声明算出；
+    // 需要等待时用 timeline semaphore 把两条独立 submit 串起来。
+    auto submitCompute = [&](bool waitForGraphics)
     {
+        uint64_t waitValue = signalValue;
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
         VkTimelineSemaphoreSubmitInfo timelineSubmit{};
         timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmit.waitSemaphoreValueCount = waitForGraphics ? 1u : 0u;
+        timelineSubmit.pWaitSemaphoreValues = waitForGraphics ? &waitValue : nullptr;
         timelineSubmit.signalSemaphoreValueCount = 1;
         timelineSubmit.pSignalSemaphoreValues = &signalValue;
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.pNext = &timelineSubmit;
+        if (waitForGraphics)
+        {
+            submitInfo.waitSemaphoreCount = 1;
+            submitInfo.pWaitSemaphores = &graphicsTimelineSemaphore;
+            submitInfo.pWaitDstStageMask = &waitStage;
+        }
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &computeCommandBuffer;
         submitInfo.signalSemaphoreCount = 1;
@@ -192,74 +257,81 @@ void Renderer::endFrame()
             throw std::runtime_error("failed to submit compute command buffer!");
 
         computeSubmissionValues[currentFrameInFlightIndex] = signalValue;
-    }
-
-    // ---- 2) graphics queue：原来的 frame 提交 + present ----
-    VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrameInFlightIndex] };
-    VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    VkSemaphore signalSemaphores[] = {
-        renderFinishedSemaphores[currentImageIndex],
-        graphicsTimelineSemaphore
     };
 
-    uint64_t waitValues[] = { 0 };
-    uint64_t signalValues[] = { 0, signalValue };
+    auto submitGraphics = [&](bool waitForCompute)
+    {
+        VkSemaphore waitSemaphores[2] = {
+            imageAvailableSemaphores[currentFrameInFlightIndex],
+            computeTimelineSemaphore
+        };
+        uint64_t waitValues[2] = { 0, signalValue };
+        VkPipelineStageFlags waitStages[2] = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+        };
+        const uint32_t waitCount = waitForCompute ? 2u : 1u;
 
-    VkTimelineSemaphoreSubmitInfo timelineSubmit{};
-    timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineSubmit.waitSemaphoreValueCount = 1;
-    timelineSubmit.pWaitSemaphoreValues = waitValues;
-    timelineSubmit.signalSemaphoreValueCount = 2;
-    timelineSubmit.pSignalSemaphoreValues = signalValues;
+        VkSemaphore signalSemaphores[2] = {
+            renderFinishedSemaphores[currentImageIndex],
+            graphicsTimelineSemaphore
+        };
+        uint64_t signalValues[2] = { 0, signalValue };
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.pNext = &timelineSubmit;
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &graphicsCommandBuffer;
-    submitInfo.signalSemaphoreCount = 2;
-    submitInfo.pSignalSemaphores = signalSemaphores;
+        VkTimelineSemaphoreSubmitInfo timelineSubmit{};
+        timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmit.waitSemaphoreValueCount = waitCount;
+        timelineSubmit.pWaitSemaphoreValues = waitValues;
+        timelineSubmit.signalSemaphoreValueCount = 2;
+        timelineSubmit.pSignalSemaphoreValues = signalValues;
 
-    if (vkQueueSubmit(vulkanDevice.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
-        throw std::runtime_error("failed to submit draw command buffer!");
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.pNext = &timelineSubmit;
+        submitInfo.waitSemaphoreCount = waitCount;
+        submitInfo.pWaitSemaphores = waitSemaphores;
+        submitInfo.pWaitDstStageMask = waitStages;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &graphicsCommandBuffer;
+        submitInfo.signalSemaphoreCount = 2;
+        submitInfo.pSignalSemaphores = signalSemaphores;
 
-    graphicsSubmissionValues[currentFrameInFlightIndex] = signalValue;
+        if (vkQueueSubmit(vulkanDevice.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+            throw std::runtime_error("failed to submit draw command buffer!");
+
+        graphicsSubmissionValues[currentFrameInFlightIndex] = signalValue;
+        lastSubmittedGraphicsFrame = signalValue;
+    };
+
+    if (computeWaitsForGraphics)
+    {
+        // graphics 先写，compute 后读/写：graphics submit 先入队，compute 等它的 timeline。
+        submitGraphics(false);
+        submitCompute(true);
+    }
+    else
+    {
+        // 无依赖时保持原来的并行提交；C->G 时 graphics 等 compute timeline。
+        submitCompute(false);
+        submitGraphics(graphicsWaitsForCompute);
+    }
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    VkSemaphore presentWaitSemaphore = renderFinishedSemaphores[currentImageIndex];
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &signalSemaphores[0];
+    presentInfo.pWaitSemaphores = &presentWaitSemaphore;
     VkSwapchainKHR swapChains[] = { vulkanSwapchain.getSwapchain() };
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = swapChains;
     presentInfo.pImageIndices = &currentImageIndex;
 
     const VkResult presentResult = vkQueuePresentKHR(vulkanDevice.getPresentQueue(), &presentInfo);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR)
-        throw std::runtime_error("swapchain out of date during present; window resize is not implemented yet");
-    if (presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR)
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
+    {
+        swapchainRecreateRequested = true;
+        return;
+    }
+    if (presentResult != VK_SUCCESS)
         throw std::runtime_error("failed to present swapchain image!");
 }
-
-#if 0   // D-1(b): 已改用 RenderGraph + 动态渲染，以下接口不再需要
-void Renderer::beginRenderPass(VkCommandBuffer commandBuffer, VkRenderPass renderPass, VkFramebuffer framebuffer, const std::vector<VkClearValue>& clearValues) 
-{
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = renderPass;
-    renderPassInfo.framebuffer = framebuffer;
-    renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = vulkanSwapchain.getSwapChainExtent();
-    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
-    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-}
-
-void Renderer::endRenderPass(VkCommandBuffer commandBuffer) 
-{
-    vkCmdEndRenderPass(commandBuffer);
-}
-#endif

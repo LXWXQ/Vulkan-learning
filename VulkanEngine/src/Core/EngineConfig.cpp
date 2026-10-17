@@ -15,12 +15,18 @@
 #include <cstdio>
 #include <vector>
 #include <exception>
+#include <filesystem>
+#include <system_error>
+#include <stdexcept>
 
 namespace
 {
 	using nlohmann::json;
 
 	std::string g_lastStatus = "(no config I/O yet)";
+	std::string g_configPath = SENTINEL_CONFIG_PATH;
+	bool g_suppressExpectedErrorLog = false;
+	constexpr int kCurrentConfigVersion = 2;
 
 	void setStatus(const std::string& s)
 	{
@@ -79,6 +85,7 @@ namespace
 	{
 		json j;
 		j["windowTitle"] = s.windowTitle;
+		j["renderScale"] = s.renderScale;
 
 		json ssao;
 		ssao["enabled"] = s.ssaoEnabled;
@@ -112,6 +119,7 @@ namespace
 	void jsonToSettings(const json& j, EngineSettings& out, std::vector<std::string>& warnings)
 	{
 		out.windowTitle = read<std::string>(j, "windowTitle", out.windowTitle, warnings);
+		out.renderScale = read(j, "renderScale", out.renderScale, warnings);
 
 		if (j.contains("ssao") && j["ssao"].is_object())
 		{
@@ -161,40 +169,59 @@ namespace
 		out.rotation = readVec(j, "rotation", out.rotation);
 	}
 
-	/// 读整个配置文件。返回 false 表示"没有可用的文件"，原因写进 outWhy。
-	bool readRoot(json& outRoot, std::string& outWhy)
+	std::string makeBackupPath(const std::string& path, int version)
 	{
-		std::ifstream file(EngineConfig::getConfigPath());
-		if (!file.is_open())
+		const std::string base = path + ".v" + std::to_string(version) + ".bak";
+		if (!std::filesystem::exists(base))
+			return base;
+		for (int i = 1; i < 1000; ++i)
 		{
-			outWhy = "config file not found";
-			return false;
+			const std::string candidate = base + "." + std::to_string(i);
+			if (!std::filesystem::exists(candidate))
+				return candidate;
 		}
+		return {};
+	}
 
-		std::stringstream buffer;
-		buffer << file.rdbuf();
-		const std::string text = buffer.str();
-		if (text.empty())
-		{
-			outWhy = "config file is empty";
+	bool backupConfigFile(const std::string& path, int version, std::string& outBackupPath)
+	{
+		outBackupPath = makeBackupPath(path, version);
+		if (outBackupPath.empty())
 			return false;
-		}
+		std::error_code ec;
+		std::filesystem::copy_file(path, outBackupPath, std::filesystem::copy_options::none, ec);
+		return !ec;
+	}
 
-		// 不使用会抛异常的 parse：别人手改坏的配置不应该让引擎起不来
-		json root = json::parse(text, nullptr, false);
-		if (root.is_discarded())
+	void migrateV0ToV1(json& root)
+	{
+		if (!root.contains("engineSettings") || !root["engineSettings"].is_object())
 		{
-			outWhy = "config file is not valid JSON";
-			return false;
+			json settings = json::object();
+			const char* legacyKeys[] = { "windowTitle", "renderScale", "ssao", "bloom", "lighting", "planned" };
+			for (const char* key : legacyKeys)
+			{
+				if (root.contains(key))
+				{
+					settings[key] = std::move(root[key]);
+					root.erase(key);
+				}
+			}
+			root["engineSettings"] = std::move(settings);
 		}
-		if (!root.is_object())
-		{
-			outWhy = "config root is not an object";
-			return false;
-		}
+		root["version"] = 1;
+	}
 
-		outRoot = std::move(root);
-		return true;
+	void migrateV1ToV2(json& root)
+	{
+		if (!root.contains("engineSettings") || !root["engineSettings"].is_object())
+			root["engineSettings"] = json::object();
+		json& settings = root["engineSettings"];
+		if (!settings.contains("renderScale") || !settings["renderScale"].is_number())
+			settings["renderScale"] = 1.0f;
+		if (!settings.contains("planned") || !settings["planned"].is_object())
+			settings["planned"] = json::object();
+		root["version"] = 2;
 	}
 
 	/// 原子写：先写 .tmp 再 rename。
@@ -231,12 +258,146 @@ namespace
 		}
 		return true;
 	}
+
+	enum class RootReadStatus
+	{
+		Ok,
+		Missing,
+		InvalidJson,
+		InvalidRoot,
+		InvalidVersion,
+		UnsupportedVersion,
+		BackupFailed,
+		MigrationFailed
+	};
+
+	struct RootLoadResult
+	{
+		RootReadStatus status = RootReadStatus::Missing;
+		json root;
+		int sourceVersion = 0;
+		bool migrated = false;
+		std::string backupPath;
+		std::string why;
+	};
+
+	RootLoadResult loadRootWithMigration()
+	{
+		RootLoadResult result;
+
+		std::ifstream file(EngineConfig::getConfigPath());
+		if (!file.is_open())
+		{
+			result.status = RootReadStatus::Missing;
+			result.why = "config file not found";
+			return result;
+		}
+
+		std::stringstream buffer;
+		buffer << file.rdbuf();
+		file.close();
+		const std::string text = buffer.str();
+		if (text.empty())
+		{
+			result.status = RootReadStatus::InvalidJson;
+			result.why = "config file is empty";
+			return result;
+		}
+
+		json root = json::parse(text, nullptr, false);
+		if (root.is_discarded())
+		{
+			result.status = RootReadStatus::InvalidJson;
+			result.why = "config file is not valid JSON";
+			return result;
+		}
+		if (!root.is_object())
+		{
+			result.status = RootReadStatus::InvalidRoot;
+			result.why = "config root is not an object";
+			return result;
+		}
+
+		int version = 0;
+		if (root.contains("version"))
+		{
+			if (!root["version"].is_number_integer())
+			{
+				backupConfigFile(EngineConfig::getConfigPath(), 0, result.backupPath);
+				result.status = RootReadStatus::InvalidVersion;
+				result.why = "config version is not an integer";
+				return result;
+			}
+			version = root["version"].get<int>();
+			if (version < 0)
+			{
+				backupConfigFile(EngineConfig::getConfigPath(), version, result.backupPath);
+				result.status = RootReadStatus::InvalidVersion;
+				result.why = "config version is negative";
+				return result;
+			}
+		}
+
+		result.sourceVersion = version;
+		if (version > kCurrentConfigVersion)
+		{
+			if (!backupConfigFile(EngineConfig::getConfigPath(), version, result.backupPath))
+			{
+				result.status = RootReadStatus::BackupFailed;
+				result.why = "unsupported config version and backup failed";
+				return result;
+			}
+			result.status = RootReadStatus::UnsupportedVersion;
+			result.why = "config version " + std::to_string(version) +
+				" is newer than supported version " + std::to_string(kCurrentConfigVersion);
+			return result;
+		}
+
+		if (version < kCurrentConfigVersion)
+		{
+			if (!backupConfigFile(EngineConfig::getConfigPath(), version, result.backupPath))
+			{
+				result.status = RootReadStatus::BackupFailed;
+				result.why = "could not back up config before migration";
+				return result;
+			}
+
+			try
+			{
+				int current = version;
+				while (current < kCurrentConfigVersion)
+				{
+					if (current == 0)
+						migrateV0ToV1(root);
+					else if (current == 1)
+						migrateV1ToV2(root);
+					else
+						throw std::runtime_error("no migration path from version " + std::to_string(current));
+					++current;
+				}
+				root["version"] = kCurrentConfigVersion;
+				if (!writeRoot(root))
+					throw std::runtime_error("could not write migrated config");
+			}
+			catch (const std::exception& e)
+			{
+				result.status = RootReadStatus::MigrationFailed;
+				result.why = e.what();
+				return result;
+			}
+
+			result.migrated = true;
+		}
+
+		result.status = RootReadStatus::Ok;
+		result.root = std::move(root);
+		return result;
+	}
 }
 
 const std::string& EngineConfig::getConfigPath()
 {
-	static const std::string path = SENTINEL_CONFIG_PATH;
-	return path;
+	return g_configPath;
 }
 
 std::string EngineConfig::getConfigFileName()
@@ -257,17 +418,43 @@ const std::string& EngineConfig::getLastStatus()
 
 bool EngineConfig::load(EngineSettings& out)
 {
-	json root;
-	std::string why;
-	if (!readRoot(root, why))
+	RootLoadResult loaded = loadRootWithMigration();
+	if (loaded.status != RootReadStatus::Ok)
 	{
-		setStatus(why + " - using compile-time defaults");
+		std::string status;
+		switch (loaded.status)
+		{
+		case RootReadStatus::Missing:
+			status = loaded.why + " - using compile-time defaults";
+			break;
+		case RootReadStatus::InvalidJson:
+		case RootReadStatus::InvalidRoot:
+			status = loaded.why + " - using compile-time defaults (file left untouched)";
+			break;
+		case RootReadStatus::InvalidVersion:
+			status = loaded.why + " - using compile-time defaults";
+			if (!loaded.backupPath.empty())
+				status += " (backup: " + std::filesystem::path(loaded.backupPath).filename().string() + ")";
+			break;
+		case RootReadStatus::UnsupportedVersion:
+			status = loaded.why + " - using compile-time defaults";
+			if (!loaded.backupPath.empty())
+				status += " (backup: " + std::filesystem::path(loaded.backupPath).filename().string() + ")";
+			break;
+		case RootReadStatus::BackupFailed:
+		case RootReadStatus::MigrationFailed:
+			status = "config migration failed: " + loaded.why + " - using compile-time defaults";
+			break;
+		default:
+			status = "config load failed - using compile-time defaults";
+			break;
+		}
+		setStatus(status);
 		std::cout << "[Config] " << g_lastStatus << " -> " << getConfigPath() << "\n";
 		return false;
 	}
 
-	// 沿用同一套 save 的嵌套结构：{ "engineSettings": {...}, "camera": {...} }
-	if (!root.contains("engineSettings") || !root["engineSettings"].is_object())
+	if (!loaded.root.contains("engineSettings") || !loaded.root["engineSettings"].is_object())
 	{
 		setStatus("no engineSettings node - using compile-time defaults");
 		std::cout << "[Config] " << g_lastStatus << "\n";
@@ -275,44 +462,69 @@ bool EngineConfig::load(EngineSettings& out)
 	}
 
 	std::vector<std::string> warnings;
-	jsonToSettings(root["engineSettings"], out, warnings);
+	jsonToSettings(loaded.root["engineSettings"], out, warnings);
 
-	setStatus("loaded " + getConfigFileName());
-	if (!warnings.empty())
+	if (loaded.migrated)
+	{
+		setStatus("migrated " + getConfigFileName() + " v" + std::to_string(loaded.sourceVersion)
+			+ " -> v" + std::to_string(kCurrentConfigVersion)
+			+ " (backup: " + std::filesystem::path(loaded.backupPath).filename().string() + ")");
+	}
+	else if (!warnings.empty())
 	{
 		setStatus("loaded with " + std::to_string(warnings.size()) + " bad field(s), defaults kept");
-		for (const std::string& w : warnings)
-			std::cout << "[Config] 警告: " << w << "\n";
 	}
+	else
+	{
+		setStatus("loaded " + getConfigFileName());
+	}
+	for (const std::string& w : warnings)
+		std::cout << "[Config] 警告: " << w << "\n";
 	std::cout << "[Config] " << g_lastStatus << " -> " << getConfigPath() << "\n";
 	return true;
 }
 
 bool EngineConfig::load(CameraState& out)
 {
-	json root;
-	std::string why;
-	if (!readRoot(root, why))
-		return false;   // 状态已由 load(EngineSettings&) 报过，这里不重复刷屏
+	RootLoadResult loaded = loadRootWithMigration();
+	if (loaded.status != RootReadStatus::Ok)
+		return false;   // load(EngineSettings&) 已经报过状态
 
-	if (!root.contains("camera") || !root["camera"].is_object())
+	if (!loaded.root.contains("camera") || !loaded.root["camera"].is_object())
 		return false;
 
-	jsonToCamera(root["camera"], out);
+	jsonToCamera(loaded.root["camera"], out);
+	if (loaded.migrated)
+	{
+		setStatus("migrated " + getConfigFileName() + " v" + std::to_string(loaded.sourceVersion)
+			+ " -> v" + std::to_string(kCurrentConfigVersion)
+			+ " (backup: " + std::filesystem::path(loaded.backupPath).filename().string() + ")");
+		std::cout << "[Config] " << g_lastStatus << "\n";
+	}
 	return true;
 }
 
 bool EngineConfig::save(const EngineSettings& settings)
 {
-	// 先把已有文件读回来，只替换 engineSettings 节点 ——
-	// 否则"保存渲染参数"会把相机位姿一起抹掉（两个 save 重载共用一个文件，
-	// 这种互相覆盖是共用文件必须付的代价，不能靠"记得先读一下"来解决）。
+	RootLoadResult loaded = loadRootWithMigration();
 	json root;
-	std::string why;
-	if (!readRoot(root, why))
+	if (loaded.status == RootReadStatus::Missing)
+	{
 		root = json::object();
+	}
+	else if (loaded.status == RootReadStatus::Ok)
+	{
+		root = std::move(loaded.root);
+	}
+	else
+	{
+		setStatus("save refused: existing config is not writable (file left untouched)");
+		if (!g_suppressExpectedErrorLog)
+			std::cerr << "[Config] " << g_lastStatus << " -> " << getConfigPath() << "\n";
+		return false;
+	}
 
-	root["version"] = 1;
+	root["version"] = kCurrentConfigVersion;
 	root["engineSettings"] = settingsToJson(settings);
 
 	if (!writeRoot(root))
@@ -325,12 +537,25 @@ bool EngineConfig::save(const EngineSettings& settings)
 
 bool EngineConfig::save(const CameraState& camera)
 {
+	RootLoadResult loaded = loadRootWithMigration();
 	json root;
-	std::string why;
-	if (!readRoot(root, why))
+	if (loaded.status == RootReadStatus::Missing)
+	{
 		root = json::object();
+	}
+	else if (loaded.status == RootReadStatus::Ok)
+	{
+		root = std::move(loaded.root);
+	}
+	else
+	{
+		setStatus("save refused: existing config is not writable (file left untouched)");
+		if (!g_suppressExpectedErrorLog)
+			std::cerr << "[Config] " << g_lastStatus << " -> " << getConfigPath() << "\n";
+		return false;
+	}
 
-	root["version"] = 1;
+	root["version"] = kCurrentConfigVersion;
 	root["camera"] = cameraToJson(camera);
 
 	if (!writeRoot(root))
@@ -338,5 +563,119 @@ bool EngineConfig::save(const CameraState& camera)
 
 	setStatus("saved camera pose -> " + getConfigFileName());
 	std::cout << "[Config] " << g_lastStatus << "\n";
+	return true;
+}
+
+bool EngineConfig::selfTest()
+{
+	namespace fs = std::filesystem;
+	const std::string originalPath = g_configPath;
+	const fs::path tempRoot = fs::temp_directory_path() / "sentinel-config-selftest";
+	std::error_code ec;
+	fs::remove_all(tempRoot, ec);
+	fs::create_directories(tempRoot, ec);
+	if (ec)
+	{
+		setStatus("config selfTest FAIL: cannot create temp directory");
+		std::cerr << "[Config] " << g_lastStatus << "\n";
+		return false;
+	}
+
+	auto writeText = [](const fs::path& path, const std::string& text)
+	{
+		std::ofstream out(path, std::ios::binary | std::ios::trunc);
+		out << text;
+		return out.good();
+	};
+	auto readText = [](const fs::path& path)
+	{
+		std::ifstream in(path, std::ios::binary);
+		std::stringstream ss;
+		ss << in.rdbuf();
+		return ss.str();
+	};
+
+	bool ok = true;
+	auto check = [&](bool condition, const char* message)
+	{
+		if (!condition)
+		{
+			ok = false;
+			std::cerr << "[Config] selfTest FAIL: " << message << "\n";
+		}
+	};
+
+	try
+	{
+		const fs::path legacyPath = tempRoot / "legacy.json";
+		const std::string legacyText = R"({
+  "version": 0,
+  "windowTitle": "Legacy Title",
+  "bloom": { "enabled": false },
+  "camera": { "position": [1.0, 2.0, 3.0], "rotation": [0.0, 0.0, 0.0] }
+})";
+		check(writeText(legacyPath, legacyText), "cannot write legacy fixture");
+		g_configPath = legacyPath.string();
+
+		EngineSettings settings;
+		settings.windowTitle = "Default Title";
+		check(load(settings), "legacy config did not load");
+		check(settings.windowTitle == "Legacy Title", "v0 top-level windowTitle was not migrated");
+		check(!settings.bloomEnabled, "v0 top-level bloom was not migrated");
+		check(settings.renderScale == 1.0f, "v2 renderScale default was not inserted");
+
+		json migrated = json::parse(readText(legacyPath), nullptr, false);
+		check(migrated.is_object() && migrated["version"] == 2, "config was not rewritten as version 2");
+		check(migrated.contains("engineSettings") && migrated["engineSettings"].is_object(),
+			"migrated config has no engineSettings object");
+
+		const fs::path legacyBackup = fs::path(legacyPath.string() + ".v0.bak");
+		check(fs::exists(legacyBackup), "legacy config backup was not created");
+		check(readText(legacyBackup) == legacyText, "legacy backup content mismatch");
+
+		CameraState camera;
+		check(load(camera), "legacy camera did not load");
+		check(camera.position.x == 1.0f && camera.position.y == 2.0f && camera.position.z == 3.0f,
+			"legacy camera pose mismatch");
+
+		const fs::path corruptPath = tempRoot / "corrupt.json";
+		const std::string corruptText = "{ this is not json";
+		check(writeText(corruptPath, corruptText), "cannot write corrupt fixture");
+		g_configPath = corruptPath.string();
+		check(!load(settings), "corrupt config unexpectedly loaded");
+		g_suppressExpectedErrorLog = true;
+		check(!save(settings), "corrupt config was unexpectedly overwritten by save");
+		g_suppressExpectedErrorLog = false;
+		check(readText(corruptPath) == corruptText, "corrupt config file was modified");
+
+		const fs::path futurePath = tempRoot / "future.json";
+		const std::string futureText = R"({ "version": 999, "engineSettings": {} })";
+		check(writeText(futurePath, futureText), "cannot write future fixture");
+		g_configPath = futurePath.string();
+		check(!load(settings), "future config unexpectedly loaded");
+		g_suppressExpectedErrorLog = true;
+		check(!save(settings), "future config was unexpectedly overwritten by save");
+		g_suppressExpectedErrorLog = false;
+		check(readText(futurePath) == futureText, "future config file was modified");
+		check(fs::exists(fs::path(futurePath.string() + ".v999.bak")), "future config backup was not created");
+	}
+	catch (const std::exception& e)
+	{
+		ok = false;
+		std::cerr << "[Config] selfTest exception: " << e.what() << "\n";
+	}
+
+	g_suppressExpectedErrorLog = false;
+	g_configPath = originalPath;
+	fs::remove_all(tempRoot, ec);
+
+	if (!ok)
+	{
+		setStatus("config selfTest FAIL");
+		return false;
+	}
+
+	setStatus("config migration selfTest PASS");
+	std::cout << "[Config] selfTest PASS: v0 -> v2 migration, backup, corrupt/future config left untouched\n";
 	return true;
 }

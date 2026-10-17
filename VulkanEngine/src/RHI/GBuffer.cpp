@@ -44,6 +44,27 @@ GBuffer::~GBuffer()
     }
 }
 
+void GBuffer::resize(VkExtent2D extent)
+{
+    if (extent.width == currentExtent.width && extent.height == currentExtent.height)
+        return;
+    if (extent.width == 0 || extent.height == 0)
+        throw std::runtime_error("[GBuffer] resize received zero extent");
+
+    destroyAttachment(position);
+    destroyAttachment(normal);
+    destroyAttachment(albedo);
+    destroyAttachment(pbr);
+    destroyAttachment(depth);
+
+    currentExtent = extent;
+    createAttachment(GBufferFormat::Position, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &position);
+    createAttachment(GBufferFormat::Normal,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &normal);
+    createAttachment(GBufferFormat::Albedo,   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &albedo);
+    createAttachment(GBufferFormat::Pbr,      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, &pbr);
+    createAttachment(device.findDepthFormat(), VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth);
+}
+
 void GBuffer::createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment) 
 {
     attachment->format = format;
@@ -87,4 +108,5 @@ void GBuffer::destroyAttachment(FrameBufferAttachment& attachment)
 {
     if (attachment.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), attachment.view, nullptr);
     if (attachment.image != VK_NULL_HANDLE) vmaDestroyImage(device.getVmaAllocator(), attachment.image, attachment.allocation);
+    attachment = {};
 }

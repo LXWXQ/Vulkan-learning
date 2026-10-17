@@ -27,6 +27,11 @@ public:
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
     std::string getName() const override { return "ComputeProbe"; }
 
+    // TD-07: disabled by default. Enable explicitly with --compute-test so the
+    // production frame pays neither the dispatches nor the host readback.
+    void setEnabled(bool e) { enabled = e; }
+    bool isEnabled() const { return enabled; }
+
 private:
     struct ProbeResult
     {
@@ -59,5 +64,6 @@ private:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unique_ptr<ComputePipeline> pipeline;
 
+    bool enabled = false;
     bool reportedFirstValidResult = false;
 };

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <array>
+#include <iostream>
 
 // push constant 的字节布局必须和 shaders/bloom_*.frag 里的声明逐一对应。
 // GLSL 的 push_constant 块按 std430 布局：vec2 占 8 字节、对齐 8，
@@ -209,6 +210,30 @@ void BloomPass::createPipelines()
     }
 }
 
+void BloomPass::resize(VkExtent2D extent)
+{
+    const uint32_t setCount = 1 + 2 * (kLevelCount - 1);
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        std::vector<RenderGraph::TextureHandle>& levels = resources.bloomLevels[frame];
+        VkExtent2D levelExtent = extent;
+        for (uint32_t i = 0; i < kLevelCount; ++i)
+        {
+            levelExtent = halfExtent(levelExtent);
+            renderGraph.resizeOwnedTexture(levels[i], levelExtent);
+        }
+
+        resources.bloomResult[frame] = levels.front();
+        const uint32_t base = frame * setCount;
+        updateDescriptor(base, renderGraph.getView(resources.hdrScene[frame]));
+        for (uint32_t i = 0; i < kLevelCount - 1; ++i)
+        {
+            updateDescriptor(base + 1 + i, renderGraph.getView(levels[i]));
+            updateDescriptor(base + 1 + (kLevelCount - 1) + i, renderGraph.getView(levels[i + 1]));
+        }
+    }
+}
+
 void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     const EngineSettings& s = frameInfo.settings;
@@ -218,32 +243,19 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     const uint32_t setCount = 1 + 2 * (kLevelCount - 1);
     const uint32_t setBase = frame * setCount;
 
-    // -----------------------------------------------------------------------
-    // 【为什么"关掉 Bloom"不是跳过这几个 Pass】
-    //
-    // 直觉做法是 pass.setEnabled(s.bloomEnabled)，但那会破坏两条约束：
-    //
-    //   1) 语义：bloomLevels / bloomResult 是瞬时资源，每帧内容都会重置。
-    //      跳过写入者之后，PresentPass 声明的读就变成"读未定义内容" ——
-    //      RenderGraph::validateWriteCoverage 会直接报错（这个报错是对的）。
-    //
-    //   2) 更硬的一条，是验证层告诉我的：PresentPass 的描述符里绑着
-    //      bloomResult，声明期望布局是 SHADER_READ_ONLY_OPTIMAL。
-    //      **只要它绑在描述符上，这个布局转换就省不掉** —— 一旦没人读它，
-    //      渲染图就不会为它发屏障，图像整帧停在 UNDEFINED，验证层直接刷
-    //      "expects layout SHADER_READ_ONLY_OPTIMAL, current layout UNDEFINED"。
-    //
-    // 所以开关改成"强度置零"：Pass 照跑，亮部提取输出全黑，上采样把零累加上去。
-    // bloomResult 因此永远是"这一帧写过的、布局正确的"图，
-    // 而 PresentPass 用 bloomIntensity=0 把它的贡献抹掉，视觉结果等价于关闭。
-    //
-    // 代价：关掉 Bloom 时仍要跑 7 个全屏 Pass（都在半分辨率以下）。
-    // 换来的是"声明与事实一致"，以及一条能被机器验证的不变量：
-    //   每一个被 read 的瞬时资源，本帧一定有人写。
-    // 后者比省下几趟全屏绘制值钱得多 —— 它是后面加 SSR / 自动曝光 / 颜色分级
-    // 时唯一能拦住"关掉某个 Pass 就花屏"的东西。
-    // -----------------------------------------------------------------------
-    const bool active = s.bloomEnabled;
+    // TD-06: Bloom disabled means no Bloom passes at all. PresentPass has a
+    // dedicated single-input descriptor set/pipeline in this case, so it does
+    // not bind bloomResult and does not require a layout transition for it.
+    if (!s.bloomEnabled)
+    {
+        static bool reportedOnce = false;
+        if (!reportedOnce)
+        {
+            reportedOnce = true;
+            std::cout << "[TD06] Bloom disabled: skipping Bright + Down + Up passes\n";
+        }
+        return;
+    }
 
     VkClearValue clear{};
     clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
@@ -254,8 +266,7 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
         pass.read(resources.hdrScene[frame]);
         pass.writeColor(levels[0], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
-        // 关闭时把强度置零 => 输出全黑 => 后续上采样累加的还是黑
-        BrightPush push{ s.bloomThreshold, s.bloomKnee, active ? 1.0f : 0.0f };
+        BrightPush push{ s.bloomThreshold, s.bloomKnee, 1.0f };
         const uint32_t setIndex = setBase;
         pass.execute([this, push, setIndex](VkCommandBuffer cmd)
         {
@@ -274,8 +285,6 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
         auto& pass = graph.addGraphicsPass("Bloom.Down" + std::to_string(i));
         pass.read(levels[i]);
         pass.writeColor(levels[i + 1], VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-        // 关闭时也照跑（见本函数开头对"为什么不用 setEnabled"的说明）
-
         const VkExtent2D srcExtent = graph.getExtent(levels[i]);
         DownPush push{};
         push.srcTexelSize = glm::vec2(1.0f / float(srcExtent.width), 1.0f / float(srcExtent.height));
@@ -299,8 +308,6 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
         auto& pass = graph.addGraphicsPass("Bloom.Up" + std::to_string(i));
         pass.read(levels[i + 1]);
         pass.writeColor(levels[i], VK_ATTACHMENT_LOAD_OP_LOAD);
-        // 关闭时也照跑：亮部提取已经输出全黑，这里累加的还是黑
-
         const VkExtent2D srcExtent = graph.getExtent(levels[i + 1]);
         UpPush push{};
         push.srcTexelSize = glm::vec2(1.0f / float(srcExtent.width), 1.0f / float(srcExtent.height));

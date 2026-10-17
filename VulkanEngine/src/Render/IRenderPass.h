@@ -33,5 +33,9 @@ public:
     // 把本 Pass 的渲染工作注册进渲染图
     virtual void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) = 0;
 
+    // TD-03: resize extent-dependent render targets in place. Pipelines use
+    // dynamic viewport/scissor, so most passes do not need pipeline rebuilds.
+    virtual void resize(VkExtent2D /*extent*/) {}
+
     virtual std::string getName() const = 0;
 };

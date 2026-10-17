@@ -47,6 +47,36 @@ void LightingPass::init()
     lightingSystem = std::make_unique<LightingSystem>(vulkanDevice, globalSetLayout);
 }
 
+void LightingPass::resize(VkExtent2D extent)
+{
+    const uint32_t imageCount = vulkanSwapchain.imageCount();
+    resources.swapchainImages.resize(imageCount);
+    for (uint32_t i = 0; i < imageCount; ++i)
+    {
+        RenderGraph::TextureDesc desc;
+        desc.name = "Swapchain[" + std::to_string(i) + "]";
+        desc.format = vulkanSwapchain.getSwapChainImageFormat();
+        desc.extent = vulkanSwapchain.getSwapChainExtent();
+        desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        if (!resources.swapchainImages[i].valid())
+        {
+            resources.swapchainImages[i] = renderGraph.importTexture(
+                desc, vulkanSwapchain.getImage(i), vulkanSwapchain.getImageView(i),
+                VK_IMAGE_LAYOUT_UNDEFINED);
+        }
+        else
+        {
+            renderGraph.updateImportedTexture(resources.swapchainImages[i], desc,
+                vulkanSwapchain.getImage(i), vulkanSwapchain.getImageView(i),
+                VK_IMAGE_LAYOUT_UNDEFINED);
+        }
+    }
+
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+        renderGraph.resizeOwnedTexture(resources.hdrScene[frame], extent);
+}
+
 void LightingPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     VkClearValue clear{};

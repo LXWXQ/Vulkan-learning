@@ -7,8 +7,11 @@
 #include "Render/PresentPass.h"
 #include "Render/SSAOPass.h"
 #include "Render/ComputeProbePass.h"
+#include "Render/CrossQueueProbePass.h"
+#include "Render/SubresourceProbePass.h"
 #include <stdexcept>
 #include <iostream>
+#include <algorithm>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -37,6 +40,7 @@ FirstApp::FirstApp()
 	VkExtent2D requestedExtent{ WIDTH, HEIGHT };
 	vulkanSwapchain = std::make_unique<Swapchain>(*vulkanDevice, requestedExtent);
 	const VkExtent2D renderExtent = vulkanSwapchain->getSwapChainExtent();
+	currentRenderExtent = renderExtent;
 	renderer = std::make_unique<Renderer>(*vulkanDevice, *vulkanSwapchain);
 
 	// D-4：每个 frame slot 一套 G-Buffer。两帧同时在飞时共享一套会跨帧读写冲突。
@@ -55,6 +59,10 @@ FirstApp::FirstApp()
 	// 所以 DescriptorManager 必须先于 Scene 创建并初始化。
 	descriptorManager = std::make_unique<DescriptorManager>();
 	descriptorManager->init(*vulkanDevice, 256);
+	descriptorManager->setFrameTimelineCallbacks(
+		[this] { return renderer->getCompletedGraphicsFrame(); },
+		[this](uint64_t frame) { renderer->waitForGraphicsFrame(frame); },
+		[this] { return renderer->getLastSubmittedGraphicsFrame(); });
 
 	scene = std::make_unique<Scene>();
 	scene->init(*vulkanDevice, renderer->getCommandPool(), *descriptorManager);
@@ -96,15 +104,23 @@ FirstApp::FirstApp()
 
 	auto computeProbePass = std::make_unique<ComputeProbePass>(*vulkanDevice, *renderGraph,
 		descriptorManager.get());
+	auto crossQueueProbePass = std::make_unique<CrossQueueProbePass>(*vulkanDevice, *renderGraph,
+		descriptorManager.get());
+	auto subresourceProbePass = std::make_unique<SubresourceProbePass>(*vulkanDevice, *renderGraph);
 
-	PresentPass* presentPassPtr = presentPass.get();
-	SSAOPass* ssaoPassPtr = ssaoPass.get();
+	presentPassPtr = presentPass.get();
+	ssaoPassPtr = ssaoPass.get();
+	computeProbePassPtr = computeProbePass.get();
+	crossQueueProbePassPtr = crossQueueProbePass.get();
+	subresourceProbePassPtr = subresourceProbePass.get();
 
 	renderPipeline.addPass(std::move(geoPass));
 	renderPipeline.addPass(std::move(ssaoPass));
 	renderPipeline.addPass(std::move(lightPass));
 	renderPipeline.addPass(std::move(bloomPass));
 	renderPipeline.addPass(std::move(presentPass));
+	renderPipeline.addPass(std::move(crossQueueProbePass));
+	renderPipeline.addPass(std::move(subresourceProbePass));
 	renderPipeline.addPass(std::move(computeProbePass));
 
 	renderPipeline.initAll();
@@ -137,29 +153,7 @@ FirstApp::FirstApp()
 	renderResources->brdfLut = importPersistent("IBL.BrdfLut",
 		iblBaker->getBrdfLutImage(), iblBaker->getBrdfLutView(), VK_FORMAT_R16G16_SFLOAT, 1, 0);
 
-	VkDescriptorImageInfo envInfo{ environmentTex->getSampler(), environmentTex->getView(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-
-	const CubemapTexture& irradiance = iblBaker->getIrradianceMap();
-	const CubemapTexture& prefiltered = iblBaker->getPrefilteredMap();
-	VkDescriptorImageInfo irradianceInfo{ irradiance.getSampler(), irradiance.getView(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo prefilteredInfo{ prefiltered.getSampler(), prefiltered.getView(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo brdfLutInfo{ iblBaker->getBrdfLutSampler(), iblBaker->getBrdfLutView(),
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-
-	std::array<VkImageView, kFramesInFlight> ssaoViews{};
-	std::array<const GBuffer*, kFramesInFlight> constGBufferPtrs{};
-	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
-	{
-		ssaoViews[frame] = ssaoPassPtr->getOutputImageView(frame);
-		constGBufferPtrs[frame] = gBufferPtrs[frame];
-	}
-
-	descriptorManager->buildGlobalSet(globalUboBuffers, envInfo, constGBufferPtrs,
-		ssaoPassPtr->getOutputSampler(), ssaoViews,
-		irradianceInfo, prefilteredInfo, brdfLutInfo);
+	rebuildGlobalDescriptors();
 
 	// D-1(b)：ImGui 改用动态渲染，只需要交换链颜色格式。
 	// D-2   ：UI 的绘制不再属于光照通道 —— 它由 PresentPass 在最终图像上叠加，
@@ -248,9 +242,206 @@ void FirstApp::initWindow(const std::string& title)
 {
 	glfwInit();
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 	window = glfwCreateWindow(WIDTH, HEIGHT, title.c_str(), nullptr, nullptr);
 }
+
+void FirstApp::setResizeTestEnabled(bool enabled)
+{
+	resizeTestEnabled = enabled;
+}
+
+void FirstApp::setMaterialStressEnabled(bool enabled)
+{
+	materialStressEnabled = enabled;
+}
+
+void FirstApp::materialStressStep()
+{
+	if (materialStressPendingSlot != kInvalidMaterialSlot)
+	descriptorManager->releaseMaterialSet(materialStressPendingSlot);
+
+	auto material = scene->getMaterialSystem().getOrCreateMaterial("__TD04Stress");
+	materialStressPendingSlot = descriptorManager->allocateMaterialSet(*material);
+	++materialStressCycles;
+	materialStressMaxPending = std::max(materialStressMaxPending,
+		descriptorManager->getPendingMaterialReleaseCount());
+}
+
+void FirstApp::setComputeProbeEnabled(bool enabled)
+{
+	computeProbePassPtr->setEnabled(enabled);
+}
+
+void FirstApp::setSubresourceTestEnabled(bool enabled)
+{
+if (subresourceProbePassPtr != nullptr)
+subresourceProbePassPtr->setMode(enabled
+? SubresourceProbePass::Mode::Positive
+: SubresourceProbePass::Mode::Disabled);
+}
+
+int FirstApp::runSubresourceErrorSelfTest()
+{
+suppressAutoSave = true;
+subresourceProbePassPtr->setMode(SubresourceProbePass::Mode::SemanticError);
+
+try
+{
+glfwPollEvents();
+if (!handleWindowMaintenance())
+throw std::runtime_error("window is not renderable during TD-05 subresource test");
+update(1.0f / 60.0f);
+render(1.0f / 60.0f);
+}
+catch (const std::exception& e)
+{
+const std::string message = e.what();
+if (message.find("mip 1 / layer 0") != std::string::npos &&
+message.find("TD05.ReadMip1Layer0") != std::string::npos)
+{
+std::cout << "[TD05] subresource semantic error PASS: expected rejection observed\n";
+vkDeviceWaitIdle(vulkanDevice->getDevice());
+return 0;
+}
+
+std::cerr << "[TD05] unexpected error during negative test: " << message << "\n";
+vkDeviceWaitIdle(vulkanDevice->getDevice());
+return 1;
+}
+
+std::cerr << "[TD05] negative test failed: expected semantic error was not thrown\n";
+vkDeviceWaitIdle(vulkanDevice->getDevice());
+return 1;
+}
+
+void FirstApp::setRenderScale(float scale)
+{
+	scene->getSettings().renderScale = std::clamp(scale, 0.25f, 1.0f);
+}
+
+VkExtent2D FirstApp::getDesiredRenderExtent() const
+{
+	const VkExtent2D swapExtent = vulkanSwapchain->getSwapChainExtent();
+	const float scale = std::clamp(scene->getSettings().renderScale, 0.25f, 1.0f);
+	return VkExtent2D{
+		std::max(1u, static_cast<uint32_t>(swapExtent.width * scale + 0.5f)),
+		std::max(1u, static_cast<uint32_t>(swapExtent.height * scale + 0.5f))
+	};
+}
+
+void FirstApp::rebuildGlobalDescriptors()
+{
+	VkDescriptorImageInfo envInfo{ environmentTex->getSampler(), environmentTex->getView(),
+	VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+	const CubemapTexture& irradiance = iblBaker->getIrradianceMap();
+	const CubemapTexture& prefiltered = iblBaker->getPrefilteredMap();
+	VkDescriptorImageInfo irradianceInfo{ irradiance.getSampler(), irradiance.getView(),
+	VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+	VkDescriptorImageInfo prefilteredInfo{ prefiltered.getSampler(), prefiltered.getView(),
+	VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+	VkDescriptorImageInfo brdfLutInfo{ iblBaker->getBrdfLutSampler(), iblBaker->getBrdfLutView(),
+	VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+	std::array<VkImageView, kFramesInFlight> ssaoViews{};
+	std::array<const GBuffer*, kFramesInFlight> constGBufferPtrs{};
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+	{
+		ssaoViews[frame] = ssaoPassPtr->getOutputImageView(frame);
+		constGBufferPtrs[frame] = gBuffers[frame].get();
+	}
+
+	descriptorManager->buildGlobalSet(globalUboBuffers, envInfo, constGBufferPtrs,
+	ssaoPassPtr->getOutputSampler(), ssaoViews,
+	irradianceInfo, prefilteredInfo, brdfLutInfo);
+}
+
+bool FirstApp::handleWindowMaintenance()
+{
+	if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0)
+	return false;
+
+	int framebufferWidth = 0;
+	int framebufferHeight = 0;
+	glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+	if (framebufferWidth <= 0 || framebufferHeight <= 0)
+	return false;
+
+	const VkExtent2D framebufferExtent{
+		static_cast<uint32_t>(framebufferWidth),
+		static_cast<uint32_t>(framebufferHeight)
+	};
+	const VkExtent2D swapExtent = vulkanSwapchain->getSwapChainExtent();
+	if (renderer->needsSwapchainRecreate() ||
+	framebufferExtent.width != swapExtent.width ||
+	framebufferExtent.height != swapExtent.height)
+	{
+		recreateSwapchain(framebufferExtent);
+	}
+	else
+	{
+		const VkExtent2D desiredExtent = getDesiredRenderExtent();
+		if (desiredExtent.width != currentRenderExtent.width ||
+		desiredExtent.height != currentRenderExtent.height)
+		recreateRenderTargets(desiredExtent);
+	}
+	return true;
+}
+
+void FirstApp::recreateRenderTargets(VkExtent2D renderExtent)
+{
+	if (renderExtent.width == 0 || renderExtent.height == 0)
+	return;
+
+	vkDeviceWaitIdle(vulkanDevice->getDevice());
+
+	for (auto& gBuffer : gBuffers)
+	gBuffer->resize(renderExtent);
+
+	renderPipeline.resizeAll(renderExtent);
+	rebuildGlobalDescriptors();
+	currentRenderExtent = renderExtent;
+
+	std::cout << "[TD03] Render targets resized: "
+	<< renderExtent.width << "x" << renderExtent.height
+	<< " (swapchain " << vulkanSwapchain->getSwapChainExtent().width << "x"
+	<< vulkanSwapchain->getSwapChainExtent().height << ")\n";
+}
+
+void FirstApp::recreateSwapchain(VkExtent2D framebufferExtent)
+{
+	if (framebufferExtent.width == 0 || framebufferExtent.height == 0)
+	return;
+
+	vkDeviceWaitIdle(vulkanDevice->getDevice());
+
+	vulkanSwapchain->recreate(framebufferExtent);
+	renderer->onSwapchainRecreated();
+
+	// ImGui's Vulkan backend caches image count and output format. Rebuild it
+	// only with the swapchain; dynamic resolution keeps the same backend.
+	imguiSystem.reset();
+	imguiSystem = std::make_unique<ImGuiSystem>(window, *vulkanDevice,
+	vulkanSwapchain->getSwapChainImageFormat(), vulkanSwapchain->imageCount(),
+	renderer->getCommandPool());
+	presentPassPtr->setImGuiSystem(imguiSystem.get());
+
+	const VkExtent2D renderExtent = getDesiredRenderExtent();
+	for (auto& gBuffer : gBuffers)
+	gBuffer->resize(renderExtent);
+
+	renderPipeline.resizeAll(renderExtent);
+	rebuildGlobalDescriptors();
+	currentRenderExtent = renderExtent;
+
+	std::cout << "[TD03] Swapchain recreated to "
+	<< vulkanSwapchain->getSwapChainExtent().width << "x"
+	<< vulkanSwapchain->getSwapChainExtent().height
+	<< ", render targets " << renderExtent.width << "x" << renderExtent.height << "\n";
+}
+
+
 
 void FirstApp::createUniformBuffers()
 {
@@ -370,7 +561,7 @@ void FirstApp::run()
 while (!glfwWindowShouldClose(window))
 {
 glfwPollEvents();
-if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) != 0)
+if (!handleWindowMaintenance())
 {
 ImGui_ImplGlfw_Sleep(10);
 continue;
@@ -426,6 +617,11 @@ void FirstApp::setSSAOEnabled(bool enabled)
 	scene->getSettings().ssaoEnabled = enabled;
 }
 
+void FirstApp::setCrossQueueTestEnabled(bool enabled)
+{
+	crossQueueProbePassPtr->setEnabled(enabled);
+}
+
 void FirstApp::saveConfig()
 {
 	// 相机位姿和渲染参数分两次写，但两次都会"读回已有内容再替换自己那一段"，
@@ -471,15 +667,69 @@ int FirstApp::runHeadlessSelfTest(int frames)
 	std::cout << "[SelfTest] 开始，共 " << frames << " 帧，bloom=" << (s.bloomEnabled ? 1 : 0)
 		<< " ssao=" << (s.ssaoEnabled ? 1 : 0) << "\n";
 
+	materialStressBaselineUsed = descriptorManager->getMaterialSlotUsed();
+
+	const auto benchmarkStart = std::chrono::high_resolution_clock::now();
 	const float dt = 1.0f / 60.0f;
 	for (int i = 0; i < frames; ++i)
 	{
+		if (resizeTestEnabled)
+		{
+			switch (i)
+			{
+			case 5:  glfwSetWindowSize(window, 1280, 720); break;
+			case 10: glfwSetWindowSize(window, 800, 600); break;
+			case 15: glfwSetWindowSize(window, 1600, 900); break;
+			case 20: glfwSetWindowSize(window, WIDTH, HEIGHT); break;
+			case 25: setRenderScale(0.5f); break;
+			case 35: setRenderScale(1.0f); break;
+			case 45: glfwIconifyWindow(window); break;
+			case 46: glfwRestoreWindow(window); break;
+			default: break;
+			}
+		}
+
+		if (materialStressEnabled)
+			materialStressStep();
+
 		glfwPollEvents();
+		if (!handleWindowMaintenance())
+		{
+			ImGui_ImplGlfw_Sleep(10);
+			continue;
+		}
 		update(dt);
 		render(dt);
 	}
 
+	const auto benchmarkEnd = std::chrono::high_resolution_clock::now();
+	const double benchmarkSeconds = std::chrono::duration<double>(benchmarkEnd - benchmarkStart).count();
+	if (benchmarkSeconds > 0.0)
+	{
+		std::cout << "[SelfTest] performance: " << frames << " frames in "
+			<< benchmarkSeconds << " s (" << (frames / benchmarkSeconds) << " FPS)\n";
+	}
+
+	if (materialStressEnabled && materialStressPendingSlot != kInvalidMaterialSlot)
+	{
+		descriptorManager->releaseMaterialSet(materialStressPendingSlot);
+		materialStressPendingSlot = kInvalidMaterialSlot;
+	}
+
 	vkDeviceWaitIdle(vulkanDevice->getDevice());
+	if (materialStressEnabled)
+	{
+		descriptorManager->collectMaterialGarbage();
+		const uint32_t usedAfter = descriptorManager->getMaterialSlotUsed();
+		if (usedAfter != materialStressBaselineUsed || descriptorManager->getPendingMaterialReleaseCount() != 0)
+			throw std::runtime_error("TD04 material slot stress leaked or failed to retire slots");
+		std::cout << "[TD04] material slot stress PASS: cycles=" << materialStressCycles
+			<< " used_before=" << materialStressBaselineUsed
+			<< " used_after=" << usedAfter
+			<< " max_pending=" << materialStressMaxPending
+			<< " capacity=" << descriptorManager->getMaterialSlotCapacity() << "\n";
+	}
+
 	std::cout << "[SelfTest] 完成 " << frames << " 帧，验证层输出见 stderr\n";
 	return 0;
 }
@@ -553,6 +803,12 @@ void FirstApp::render(float dt)
 		renderGraph->presentTransition(renderResources->swapchainImages[frameInfo.swapchainImageIndex]);
 		renderGraph->endFrame();
 
-		renderer->endFrame();
+		const auto& crossQueue = renderGraph->getCrossQueueDependencies();
+		renderer->endFrame(crossQueue.computeToGraphics, crossQueue.graphicsToCompute);
+	}
+	else
+	{
+		// Acquire failed after update() already started an ImGui frame.
+		imguiSystem->discardFrame();
 	}
 }

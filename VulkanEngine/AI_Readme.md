@@ -218,12 +218,11 @@ VulkanEngine/
 │   │   ├── square_green.png    # 备用
 │   │   ├── RuslLessRL/ RustLessRH/ RustedMetal/   # 更多 PBR 贴图集（当前未使用）
 │   │   └── Readme.md
-├── shaders/                    # 见第 8 节着色器一览（含 3 个已废弃但仍在的 shader）
+├── shaders/                    # 见第 8 节着色器一览（只有运行时在用的 shader）
 ├── RTR4_Notes/                 # 学习笔记（chapters/Ch07_Shadows.md + images/），与引擎无关
 └── src/
     ├── Core/
     │   ├── Application.h/.cpp        # FirstApp：构造顺序 orchestrator + run/update/render
-    │   ├── Descriptor.h/.cpp         # 【已废弃】DescriptorAllocator + DescriptorBuilder，不在渲染路径上
     │   ├── DescriptorManager.h/.cpp  # 描述符池 / Set 0 全局 / Set 1 材质槽位（唯一在用的描述符系统）
     │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
     │   ├── JobSystem.h/.cpp         # D-6 CPU 线程池 / submit / parallelFor
@@ -248,7 +247,7 @@ VulkanEngine/
     │   ├── CommandUtils.h            # cmdSetFullViewportAndScissor / cmdBeginSingleTime / cmdEndSingleTime
     │   ├── RenderGraph.h/.cpp        # 线性渲染图：自动屏障 + 动态渲染作用域（**核心**）
     │   ├── Device.h/.cpp             # 实例/物理设备/逻辑设备/队列/VMA + 验证层 + findDepthFormat
-    │   ├── Swapchain.h/.cpp          # 交换链 + ImageView（**depth 资源已无人使用**，见 12 节）
+    │   ├── Swapchain.h/.cpp          # 交换链 + ImageView + 原地 recreate（TD-03）
     │   ├── Renderer.h/.cpp           # 帧生命周期：2 帧在飞 + graphics/compute 双命令流 / 双 timeline
     │   ├── GBuffer.h/.cpp            # 5 附件的创建/销毁 + GBufferFormat 格式常量 + NEAREST 采样器
     │   ├── Pipeline.h/.cpp           # 图形管线 + ComputePipeline 封装
@@ -556,17 +555,16 @@ void RenderGraph::presentTransition(TextureHandle handle)
 | `bloom_bright.frag` | BloomPass | Rec.709 亮度 + **soft knee**（避免阈值硬边），输出 `c * weight * intensity` |
 | `bloom_down.frag` | BloomPass | 13 抽样 dual-filter 降采样；首级打开 **Karis 加权**抑制萤火虫 |
 | `bloom_up.frag` | BloomPass | 3×3 帐篷滤波；配合管线的 `ONE/ONE` 加法混合叠加到细一级 |
-| `present.frag` | PresentPass | `hdr + bloom * intensity` → 曝光 → **ACES Filmic（Narkowicz）** → `pow(1/2.2)` → 交换链 |
+| `present.frag` | PresentPass | Bloom 开启：`hdr + bloom * intensity` → 曝光 → **ACES Filmic（Narkowicz）** → `pow(1/2.2)` → 交换链 |
+| `present_no_bloom.frag` | PresentPass | TD-06 Bloom 关闭路径：只采样 HDR，不绑定 bloomResult |
 | `ibl_capture.vert` | IBLBaker（4 条管线共用） | 全屏三角形（立方体面方向由 push constant 的 `faceIndex` 推出） |
 | `ibl_equirect_to_cube.frag` | IBLBaker | 等距柱状 → 立方体（6 面） |
 | `ibl_irradiance.frag` | IBLBaker | 半球余弦卷积（`sampleDelta = 0.025`，固定采样数） |
 | `ibl_prefilter.frag` | IBLBaker | GGX 重要性采样 + Hammersley + 采样立体角估算 mip |
 | `ibl_brdf_lut.frag` | IBLBaker | split-sum 第二项积分表，(NdotV, roughness) → (A, B)，1024 采样 |
-| ~~`light_cube.vert/.frag`~~ | **没人引用** | 光源调试可视化，历史残留 |
-| ~~`shader.vert/.frag`~~ | **没人引用** | 更早期的教学 shader，历史残留 |
 
-> `shaders/` 目录里还躺着 `vert.spv` / `frag.spv` / `light_cube.*.spv` / `shader.*.spv` 等**源目录里的 .spv**。
-> 构建产物一律写到 `build/shaders/`，这些是早期误留在源码目录里的垃圾，可以删。
+> TD-08 已删除废弃的 `light_cube.*`、`shader.*` 和源码目录里的旧 `.spv`。
+> 构建产物只写到 `build/shaders/`。
 
 ---
 
@@ -756,6 +754,7 @@ bool load(EngineSettings& out);       // 文件不存在/语法错/字段类型�
 bool load(CameraState& out);
 bool save(const EngineSettings&);     // 两次 save 都是"读回已有内容再替换自己那一段"
 bool save(const CameraState&);        // -> 两者不会互相覆盖
+static bool selfTest();                // TD-09：版本迁移 / 备份 / 损坏配置保护
 static const std::string& getLastStatus();     // 供 UI 显示（ASCII！见下）
 static const std::string& getConfigPath();     // 绝对路径
 static std::string getConfigFileName();        // 只取文件名（UI 用，避免撑宽面板）
@@ -767,6 +766,8 @@ static std::string getConfigFileName();        // 只取文件名（UI 用，避
 | 解析库 | nlohmann/json 3.10.4，**已经躺在 `3rdParty/tinygltf/json.hpp`**（tinygltf 拉的），不额外引依赖、不联网 |
 | 落盘时机 | 关窗退出（析构里调，所以自检/异常退出也覆盖）+ 面板 Save 按钮 |
 | 原子写 | 先写 `.tmp` 再 rename。直接覆盖写的话，写到一半崩溃会留下语法坏掉的配置 |
+| 版本迁移 | 当前 `version = 2`；v0 -> v1 把旧顶层字段收进 `engineSettings`，v1 -> v2 补齐 `renderScale`/`planned`；迁移前备份 `.vN.bak` |
+| 损坏保护 | 损坏 JSON / 未来版本 / 非法 version 不覆盖原文件；`save()` 对不可读的已有配置直接拒绝 |
 | 自检免疫 | 自检会把 bloom/ssao 关掉，所以自检模式下 `suppressAutoSave` 禁掉退出保存 |
 
 **实测**：只改 json、不重编译，把 `exposure` 从 1.0 改成 2.0 → 过曝像素从 7.5% 涨到 34%。
@@ -848,10 +849,10 @@ init_info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats =
 
 同理，`GeometrySystem::render` 里的 `lastBoundSlot` 初值也是 `kInvalidMaterialSlot`，保证第一个子网格一定会真正 bind 一次。
 
-### 坑 5：录制完就销毁 Framebuffer / ImageView 是错的
+### 坑 5：录制完就销毁命令缓冲引用的资源是错的
 
-命令缓冲只是"**录进去**"了，还没提交执行。此时销毁 Framebuffer 会让 `vkCmdBeginRenderPass` 指向已销毁对象 —— 验证层刷屏（而且往往刷在几十帧之后，很难定位）。
-`IBLBaker` 的做法是：把新建的 `VkFramebuffer` 攒进 `pendingFramebuffers`，等 `cmdEndSingleTime()`（内部 `vkQueueWaitIdle`）之后再统一释放。
+命令缓冲只是"**录进去**"了，还没提交执行。此时销毁它引用的 image/view/buffer 会让后续 `vkQueueSubmit` 指向失效对象 —— 验证层刷屏，而且往往刷在几十帧之后。
+TD-08 已把 `IBLBaker` 的旧 `VkRenderPass`/`VkFramebuffer` 残留删除；当前 IBL 烘焙走动态渲染。以后若在录制后延迟释放资源，仍必须等 `cmdEndSingleTime()`（内部 `vkQueueWaitIdle`）或对应 timeline 完成后才能销毁。
 
 ### 坑 6：动态 viewport/scissor 必须在录制时显式设置
 
@@ -1106,11 +1107,10 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
 4. **`RenderGraph::setPassEnabled(name, enabled)` 实际不可用**（帧间 `passes` 是空的），见第 9 节。
 5. ~~**`RenderGraph` 的 compute 路径只有骨架**~~ → **D-5 已补**：`addComputePass` 会记录到独立 compute command buffer；新增 `BufferHandle` / `readBuffer` / `writeBuffer` / buffer barrier，并把 buffer 纳入语义校验。仍需补跨队列 producer/consumer 调度。
 6. **`Pass::writeDepth` 会静默改写清屏值**：`clear.depthStencil.depth == 0.0f && stencil == 0` 时被改成 `{1.0f, 0}`。想真的把深度清成 0 的调用方会被坑。
-7. **`Swapchain` 里的深度资源已经没人用了**：构造函数仍然调 `createDepthResources()`（分配一张 depth image + view），但深度现在由 `GBuffer` 持有。同时 `swapChainFramebuffers` 永远是空的（`createFramebuffers(VkRenderPass)` 已无人调用），析构里那个循环是空转。`getFramebuffer()` / `getDepthImageView()` / `createFramebuffers()` 都是死接口。
-8. **`IBLBaker` 里有死代码**：匿名命名空间的 `createOffscreenRenderPass()` 定义后从未调用；`makeFramebuffer()` 定义后从未调用；`pendingFramebuffers` / `cubeRenderPass` / `lutRenderPass` 都是 D-1(b) 迁移到动态渲染之后的残留（`createRenderPasses()` 现在是空函数，注释说明了"保留成空函数是为了不动 bake() 的调用顺序"）。
-9. **`src/Core/Descriptor.h/.cpp` 不在渲染路径上**（`DescriptorAllocator` + `DescriptorBuilder`）。仍然被 `file(GLOB_RECURSE)` 编进目标，但没有任何渲染路径使用它。
-   `adb622d` 已经在文件顶部加了「历史遗留 / 已不在渲染路径上，不要往这里加东西」的说明（理由是"将来做 D-4 多帧并行时，多池轮转会是有参考价值的另一种思路"）。**这是一处有意保留的遗留，不是漏删** —— 但其中提到的"还有零散引用"目前已经只剩它自己（全仓库除了 `Descriptor.h/.cpp` 没有别的翻译单元引用这两个类）。
-10. **废弃 shader 仍在树里**：`shaders/light_cube.vert/.frag`、`shaders/shader.vert/.frag` 无人引用；`shaders/` 源目录里还躺着 `vert.spv` / `frag.spv` / `light_cube.*.spv` / `shader.*.spv` 等构建产物（真正的产物在 `build/shaders/`）。
+7. ~~**`Swapchain` 深度/Framebuffer 死接口**~~ → ✅ **TD-08 已删除**：depth 资源、`createFramebuffers()`、`getFramebuffer()`、`getDepthImageView()` 全部移除。
+8. ~~**`IBLBaker` RenderPass/Framebuffer 残留**~~ → ✅ **TD-08 已删除**：`createOffscreenRenderPass()`、`makeFramebuffer()`、`pendingFramebuffers`、`cubeRenderPass`/`lutRenderPass`、空 `createRenderPasses()` 全部移除。
+9. ~~**`src/Core/Descriptor.h/.cpp` 不在渲染路径上**~~ → ✅ **TD-08 已删除**；唯一描述符系统是 `DescriptorManager`。
+10. ~~**废弃 shader 与源目录 `.spv`**~~ → ✅ **TD-08 已删除**；验证脚本新增 dead-file guard。
 11. **EnTT / spdlog 只配了 include 路径，一行代码都没用**（日志仍是 `std::cout`/`std::cerr`）。
 12. **`gridPipeline` 不会被触发**：`GeometrySystem` 建了它、`grid_mrt.*` 也编了，但没有任何实体把 `RenderTagComponent::isGrid` 设成 `true`。
 13. **`FrameInfo::frameIndex` 名字有误导性**：它装的是 `renderer->getCurrentImageIndex()`（交换链图像索引），不是帧计数器。
@@ -1125,15 +1125,9 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
     为了让语义校验的不变量成立（每个被 read 的瞬时资源本帧一定有人写），
     Bloom 关闭时不再跳过 Pass，而是把亮部提取的强度置零 —— 输出全黑，视觉等价，
     但 Pass 照跑。代价是关掉 Bloom 后仍有 1 次半分辨率全屏 + 3 次降采样 + 3 次上采样。
-    **更好的做法**是 PresentPass 准备两套描述符绑定（bloom 开 / 关各一套），
-    关闭时直接不绑 bloomResult，这样 Pass 可以真正跳过。没做的原因是描述符要每帧重写、
-    而当前是 init 时写一次；收益（省 7 个半分辨率 Pass）暂时不值得那份复杂度。
-    **重新权衡的时机**：Bloom 变重时（加多级金字塔、改成 compute 版、或接入自动曝光用它的 mip 链）。
-18. **`EngineConfig` 没有版本迁移，也没有多套预设**。`version` 字段写进去了但没人读；
-    想加画质档位（低/中/高）需要扩展成目录 + 名字，现在只有一个 `engine.json`。
-19. ~~**W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip / 层**。~~
-    > ✅ **D-5 已扩展到 storage buffer**：瞬时 buffer 若在本帧被读但没人写，会像纹理一样抛错。
-    > 单个 mip / 层的独立读写仍未细分，等真正出现分层资源时再补。
+    17. ~~**关闭 Bloom 仍有 7 个全屏 Pass 固定开销**~~ → ✅ **TD-06 已修**：关闭时 BloomPass 直接返回，PresentPass 使用只读 HDR 的独立管线。
+18. ~~**`EngineConfig` 没有版本迁移**~~ → ✅ **TD-09 已修**：显式 v0 -> v1 -> v2 迁移、迁移前备份、损坏/未来版本不覆盖原文件，并有 `--config-test` 回归。多套画质预设仍未实现。
+19. ~~**W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip / 层**~~ → ✅ **TD-05 已修**：buffer 区间和 mip/layer 子资源都独立跟踪并有正反例回归。
 20. **验证脚本的两个隐含前提没有自动化保护**：必须"正常关窗退出"（否则覆盖不到析构路径，
     见坑 15）、必须"确认窗口到了前台"（否则截到桌面，数字看着正常但毫无意义）。
     两条都在脚本里做了显式检查并在失败时**丢弃结果**，但它们是外部脚本（在 `%TEMP%` 下），

@@ -38,6 +38,7 @@ public:
 
     void init() override;
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
+    void resize(VkExtent2D extent) override;
     std::string getName() const override { return "Bloom"; }
 
     // 每一级金字塔的降采样倍率固定为 2，级数决定辉光的最大半径

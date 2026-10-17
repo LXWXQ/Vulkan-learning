@@ -24,6 +24,7 @@ public:
 
     void init() override;
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
+    void resize(VkExtent2D extent) override;
     std::string getName() const override { return "Lighting"; }
 
 private:

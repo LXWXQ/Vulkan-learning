@@ -11,6 +11,14 @@
 //   --selftest [N]                跑 N 帧（默认 600）后退出，用于验证层回归
 //   --no-bloom                    自检时关掉 Bloom
 //   --no-ssao                     自检时关掉 SSAO
+//   --cross-queue-test            启用 TD-02 跨队列验收探针（需配合 --selftest）
+//   --resize-test                 自检中连续缩放窗口并切换动态分辨率
+//   --material-stress             自检中每帧分配/延迟归还材质槽位（TD-04）
+//   --subresource-test            启用 TD-05 多 mip/layer 正向探针
+//   --subresource-error-test      期望 RenderGraph 拒绝 mip0 写、mip1 读
+//   --compute-test                启用 D-5 compute probe 独立回归（默认关闭）
+//   --config-test                 EngineConfig 版本迁移 / 损坏配置保护自检
+//   --render-scale <0.25..1.0>    动态分辨率初始倍率（需配合 --selftest）
 //
 // 为什么需要自检开关：
 //   "关掉某个 Pass"是最容易漏验证层错误的分支 —— 中间目标整帧没人写
@@ -33,6 +41,14 @@ int main(int argc, char** argv)
     bool noBloom = false;
     bool noSSAO = false;
     bool jobTest = false;
+    bool crossQueueTest = false;
+    bool resizeTest = false;
+    bool materialStress = false;
+    bool subresourceTest = false;
+    bool subresourceErrorTest = false;
+    bool computeTest = false;
+    bool configTest = false;
+    float renderScale = 1.0f;
     int  selfTestFrames = 600;
 
     for (int i = 1; i < argc; ++i)
@@ -50,10 +66,25 @@ int main(int argc, char** argv)
         else if (arg == "--no-bloom") noBloom = true;
         else if (arg == "--no-ssao")  noSSAO = true;
         else if (arg == "--jobtest")  jobTest = true;
+        else if (arg == "--cross-queue-test") crossQueueTest = true;
+        else if (arg == "--resize-test") resizeTest = true;
+        else if (arg == "--material-stress") materialStress = true;
+        else if (arg == "--subresource-test") subresourceTest = true;
+        else if (arg == "--subresource-error-test") subresourceErrorTest = true;
+        else if (arg == "--compute-test") computeTest = true;
+        else if (arg == "--config-test") configTest = true;
+        else if (arg == "--render-scale" && i + 1 < argc)
+        {
+            try { renderScale = std::stof(argv[++i]); }
+            catch (...) { /* keep default */ }
+        }
     }
 
     try
     {
+        if (configTest)
+            return EngineConfig::selfTest() ? EXIT_SUCCESS : EXIT_FAILURE;
+
         if (jobTest)
         {
             JobSystem jobSystem;
@@ -62,12 +93,20 @@ int main(int argc, char** argv)
 
         FirstApp app;
 
+        if (noBloom) app.setBloomEnabled(false);
+        if (noSSAO) app.setSSAOEnabled(false);
+        if (crossQueueTest) app.setCrossQueueTestEnabled(true);
+        if (resizeTest) app.setResizeTestEnabled(true);
+        if (materialStress) app.setMaterialStressEnabled(true);
+        if (subresourceTest) app.setSubresourceTestEnabled(true);
+        if (computeTest) app.setComputeProbeEnabled(true);
+        app.setRenderScale(renderScale);
+
+        if (subresourceErrorTest)
+            return app.runSubresourceErrorSelfTest();
+
         if (selfTest)
-        {
-            if (noBloom) app.setBloomEnabled(false);
-            if (noSSAO)  app.setSSAOEnabled(false);
             return app.runHeadlessSelfTest(selfTestFrames);
-        }
 
         app.run();
     }

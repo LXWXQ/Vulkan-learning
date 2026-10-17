@@ -24,9 +24,11 @@ public:
 	//                     动态渲染作用域里调用，保证 UI 画在最终图像之上。
 	void prepareDrawData(FrameInfo& frameInfo);
 	void renderDrawData(VkCommandBuffer commandBuffer);
+	// Called when acquire fails before this ImGui frame can be rendered.
+	void discardFrame();
 
 private:
-	void renderPerformancePanel(float dt, RenderTelemetry& telemetry);
+	void renderPerformancePanel(float dt, RenderTelemetry& telemetry, EngineSettings& settings);
 	void renderSSAOPanel(EngineSettings& settings);
 	void renderLightingPanel(EngineSettings& settings);
 	void renderBloomPanel(EngineSettings& settings);

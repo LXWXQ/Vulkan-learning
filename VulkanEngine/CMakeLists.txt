@@ -20,19 +20,29 @@ set(TINYGLTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinygltf")
 set(ENTT_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/entt")
 set(SPDLOG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/spdlog")
 
-# tinygltf 是当前唯一必须存在、但体积较大且不进版本库的依赖。
-# 提前给出可执行的修复命令，比在编译期报 "cannot open tiny_gltf.h" 清楚。
-if(NOT EXISTS "${TINYGLTF_DIR}/tiny_gltf.h" OR NOT EXISTS "${TINYGLTF_DIR}/json.hpp")
-    message(FATAL_ERROR
-        "缺少 tinygltf/json.hpp。请执行：\n"
-        "  git clone --depth 1 https://github.com/syoyo/tinygltf.git \"${TINYGLTF_DIR}\"")
-endif()
-
-# EnTT 用 src/ 作为 include 根，代码里写 #include <entt/entt.hpp>。
-if(NOT EXISTS "${ENTT_DIR}/src/entt/entt.hpp")
-    message(FATAL_ERROR
-        "缺少 EnTT。请下载 v3.16.0（C++17 兼容）并放到 \"${ENTT_DIR}\"。")
-endif()
+# 所有第三方依赖都不进版本库。配置阶段统一检查关键文件，缺失时给出
+# 一条可执行的修复命令，避免等到编译期才报 "cannot open ..."。
+# spdlog 是可选依赖，当前未启用，因此不在必需清单里。
+set(SENTINEL_REQUIRED_DEPENDENCY_FILES
+    "${GLFW_DIR}/CMakeLists.txt"
+    "${GLFW_DIR}/include/GLFW/glfw3.h"
+    "${GLM_DIR}/glm/glm.hpp"
+    "${IMGUI_DIR}/imgui.cpp"
+    "${STB_DIR}/stb_image.h"
+    "${TINYOBJ_DIR}/tiny_obj_loader.h"
+    "${VMA_DIR}/vk_mem_alloc.h"
+    "${TINYGLTF_DIR}/tiny_gltf.h"
+    "${TINYGLTF_DIR}/json.hpp"
+    "${ENTT_DIR}/src/entt/entt.hpp"
+)
+foreach(DEPENDENCY_FILE IN LISTS SENTINEL_REQUIRED_DEPENDENCY_FILES)
+    if(NOT EXISTS "${DEPENDENCY_FILE}")
+        message(FATAL_ERROR
+            "缺少第三方依赖文件：${DEPENDENCY_FILE}\n"
+            "请从仓库根目录执行：\n"
+            "  powershell -NoProfile -ExecutionPolicy Bypass -File tools/SetupDependencies.ps1")
+    endif()
+endforeach()
 
 # GLFW：优先使用 3rdParty/glfw 自带源码，避免依赖机器上是否安装过 glfw3。
 # 如果以后把 3rdParty/glfw 换成系统包，也仍然保留 find_package 回退路径。
@@ -47,7 +57,7 @@ else()
 endif()
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
 
-file(GLOB_RECURSE SOURCES "src/*.cpp")
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
 list(APPEND SOURCES "main.cpp")
 

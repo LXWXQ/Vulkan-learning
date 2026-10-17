@@ -98,6 +98,10 @@ struct EngineSettings
 	// 放在光照通道里会让 Bloom 的阈值随曝光一起变，调曝光时辉光强度会乱跳。
 	float exposure = 1.0f;
 
+	// TD-03：动态分辨率。只改变 G-Buffer / SSAO / HDR / Bloom 中间目标，
+	// 交换链和管线保持不变；Present 负责把低分辨率 HDR 上采样到窗口。
+	float renderScale = 1.0f;
+
 	// ---- Bloom（D-2）----
 	// 阈值作用在线性 HDR 上，1.0 ≈ 刚好"纯白"的亮度。
 	//

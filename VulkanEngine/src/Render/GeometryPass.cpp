@@ -45,6 +45,30 @@ void GeometryPass::init()
                                                       globalSetLayout, materialSetLayout);
 }
 
+void GeometryPass::resize(VkExtent2D extent)
+{
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        GBuffer& gBuffer = *gBuffers[frame];
+        auto update = [&](const char* name, const FrameBufferAttachment& att, VkImageUsageFlags usage,
+                          RenderGraph::TextureHandle handle)
+        {
+            RenderGraph::TextureDesc desc;
+            desc.name = std::string(name) + ".Frame" + std::to_string(frame);
+            desc.format = att.format;
+            desc.extent = extent;
+            desc.usage = usage | VK_IMAGE_USAGE_SAMPLED_BIT;
+            renderGraph.updateImportedTexture(handle, desc, att.image, att.view, VK_IMAGE_LAYOUT_UNDEFINED);
+        };
+
+        update("GBuffer.Position", gBuffer.getPosition(), VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, resources.gbPosition[frame]);
+        update("GBuffer.Normal",   gBuffer.getNormal(),   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, resources.gbNormal[frame]);
+        update("GBuffer.Albedo",   gBuffer.getAlbedo(),   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, resources.gbAlbedo[frame]);
+        update("GBuffer.Pbr",      gBuffer.getPbr(),      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, resources.gbPbr[frame]);
+        update("GBuffer.Depth",    gBuffer.getDepth(),    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, resources.gbDepth[frame]);
+    }
+}
+
 void GeometryPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     const uint32_t frame = frameInfo.frameInFlightIndex;

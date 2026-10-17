@@ -36,6 +36,7 @@ public:
 
     void init() override;
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
+    void resize(VkExtent2D extent) override;
     std::string getName() const override { return "SSAO"; }
 
     // 供 Application 写进每帧的全局描述符集（binding 6）。

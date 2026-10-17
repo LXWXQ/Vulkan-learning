@@ -97,6 +97,17 @@ void ComputeProbePass::init()
 
 void ComputeProbePass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
+    if (!enabled)
+    {
+        static bool reportedDisabled = false;
+        if (!reportedDisabled)
+        {
+            reportedDisabled = true;
+            std::cout << "[TD07] ComputeProbe disabled: no probe dispatches or CPU readback\n";
+        }
+        return;
+    }
+
     const uint32_t frame = frameInfo.frameInFlightIndex;
 
     // Renderer::beginFrame 已经等过这个 slot 的 compute timeline，因此这里读

@@ -70,7 +70,7 @@ void ImGuiSystem::prepareDrawData(FrameInfo& frameInfo)
 
 	ImGui::Begin("Sentinel Engine Core");
 
-	renderPerformancePanel(frameInfo.frameTime, frameInfo.telemetry);
+	renderPerformancePanel(frameInfo.frameTime, frameInfo.telemetry, frameInfo.settings);
 	renderSSAOPanel(frameInfo.settings);
 	renderLightingPanel(frameInfo.settings);
 	renderBloomPanel(frameInfo.settings);
@@ -89,7 +89,12 @@ void ImGuiSystem::renderDrawData(VkCommandBuffer commandBuffer)
 	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
 }
 
-void ImGuiSystem::renderPerformancePanel(float dt, RenderTelemetry& telemetry)
+void ImGuiSystem::discardFrame()
+{
+	ImGui::EndFrame();
+}
+
+void ImGuiSystem::renderPerformancePanel(float dt, RenderTelemetry& telemetry, EngineSettings& settings)
 {
 	if (!ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen))
 		return;
@@ -101,6 +106,7 @@ void ImGuiSystem::renderPerformancePanel(float dt, RenderTelemetry& telemetry)
 	// D-3 bindless 的收益只体现在这一行：draw call 数不变，但绑定次数从
 	// "每个子网格一次"降到"每帧一次"。看着不起眼，它是后面实例化的前提。
 	ImGui::Text("Desc. Binds: %u", telemetry.descriptorBinds);
+	ImGui::SliderFloat("Render Scale", &settings.renderScale, 0.25f, 1.0f, "%.2f");
 }
 
 void ImGuiSystem::renderSSAOPanel(EngineSettings& settings)

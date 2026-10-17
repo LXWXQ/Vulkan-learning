@@ -67,6 +67,17 @@ cmake --build build --config Debug
 
 ## 2. TD-01（P0）依赖与验证脚本不可复现
 
+> **状态：已完成（2026-10-17）**。新增 `tools/SetupDependencies.ps1`、
+> `tools/Validate.ps1` 与 `tools/README.md`；固定了 8 个第三方依赖版本，
+> CMake 在 configure 阶段检查全部关键头文件，并把源码 glob 改为
+> `CONFIGURE_DEPENDS`。一条命令即可完成依赖、全新构建与全部自检：
+>
+> ```powershell
+> powershell -NoProfile -ExecutionPolicy Bypass -File tools/Validate.ps1
+> ```
+>
+> 验证脚本检查每个测试的退出码与 stderr 字节数，并核对关键 stdout 标记。
+
 ### 现状
 
 - `3rdParty/` 被 `.gitignore` 忽略；必须依赖本机已有目录。
@@ -103,6 +114,15 @@ cmake --build build --config Debug
 ---
 
 ## 3. TD-02（P0）compute/graphics 跨队列 producer-consumer 同步
+
+> **状态：已完成（2026-10-17）**。跨队列资源通过显式的
+> `crossQueue=true` 走 `VK_SHARING_MODE_CONCURRENT` 简单路径；
+> `RenderGraph` 按 pass 声明顺序增量推导 C->G / G->C 依赖，检测到双向依赖
+> 会明确报错；`Renderer` 根据方向决定 submit 顺序，并用 timeline semaphore
+> 插入跨队列 wait。新增 `CrossQueueProbePass` 交替验证两个方向：
+> compute SSBO -> graphics，以及 graphics storage image -> compute。
+> `--selftest 20 --cross-queue-test` 实测 stderr 0 字节，两个方向均输出
+> `[TD02] ... verified`。
 
 ### 现状
 
@@ -142,6 +162,16 @@ cmake --build build --config Debug
 
 ## 4. TD-03（P1）窗口缩放与 swapchain 重建
 
+> **状态：已完成（2026-10-17）**。窗口改为可缩放；acquire/present 对
+> `VK_ERROR_OUT_OF_DATE_KHR` / `VK_SUBOPTIMAL_KHR` 设置重建请求，应用在帧边界
+> `vkDeviceWaitIdle` 后原地重建 swapchain、render-finished semaphore 与 ImGui 后端。
+> `RenderGraph` 新增 owned texture 原位 resize / imported texture 视图更新；
+> G-Buffer、SSAO、HDR、Bloom 与 Present 描述符按同一组 pass 顺序重建。
+> 管线继续使用动态 viewport/scissor，不随分辨率重建；新增 `renderScale`
+> 动态分辨率接口（G-Buffer/SSAO/HDR/Bloom 缩放，交换链不变）。
+> `--selftest 60 --resize-test` 覆盖 4 次窗口缩放、0.5x/1.0x 动态分辨率切换和
+> 最小化/恢复，验证层 stderr 0 字节。
+
 ### 现状
 
 - `glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE)`。
@@ -166,6 +196,16 @@ cmake --build build --config Debug
 
 ## 5. TD-04（P1）材质槽位归还的 vkDeviceWaitIdle
 
+> **状态：已完成（2026-10-17）**。`releaseMaterialSet()` 不再调用
+> `vkDeviceWaitIdle`，而是把槽位放入 deferred release 队列，记录归还时的最后
+> 已提交 graphics frame。`DescriptorManager` 通过 Renderer 的 graphics timeline
+> 查询已完成帧；只有 `safeAfterFrame <= completedFrame` 才把槽位放回 freeSlots。
+> 材质 bindless 数组同时启用 `descriptorBindingSampledImageUpdateAfterBind` +
+> `UPDATE_AFTER_BIND_POOL`，允许向已绑定的描述符数组继续写入新槽位。
+> 空闲槽位耗尽时也只等待最老的、可能仍引用该槽位的 graphics 提交，而不是停整台设备。
+> 新增 `--material-stress`：每帧分配一个槽位、延迟归还上一帧槽位，150 轮后
+> `used_before=26 used_after=26 max_pending=2 capacity=256`，验证层 stderr 0 字节。
+
 ### 现状
 
 `DescriptorManager::releaseMaterialSet()` 归还 bindless 数组槽位前执行 `vkDeviceWaitIdle`。
@@ -184,6 +224,14 @@ cmake --build build --config Debug
 ---
 
 ## 6. TD-05（P1）RenderGraph 子资源语义校验
+
+> **状态：已完成（2026-10-17）**。`RenderGraph` 的纹理访问新增
+> `SubresourceRange`，每张纹理按 mip/layer 维护独立 layout/stage/access 状态；
+> barrier 按实际声明的子资源逐项发 `VkImageMemoryBarrier2`，不会误转整个 mip 链。
+> 写覆盖校验也按子资源进行：写 mip0/layer0 后再读 mip1/layer0 会明确报错并指出
+> mip/layer；buffer access 同样支持 `BufferRange` 的 offset/size 与区间覆盖检查。
+> 新增 `--subresource-test` 正向探针（mip0-layer0 / mip1-layer1 + 两段 buffer）
+> 和 `--subresource-error-test` 反例；两者验证层 stderr 均为 0 字节。
 
 ### 现状
 
@@ -204,6 +252,16 @@ cmake --build build --config Debug
 ---
 
 ## 7. TD-06（P2）关闭 Bloom 的固定 Pass 开销
+
+> **状态：已完成（2026-10-17）**。Bloom 关闭时 `BloomPass` 直接返回，不再注册
+> Bright / 3×Down / 3×Up，共省掉 7 个全屏 Pass。PresentPass 现在有两套路径：
+> Bloom 开时读 HDR+Bloom 并走原 `present.frag`；关闭时只读 HDR，使用独立的
+> 单绑定描述符布局和 `present_no_bloom.frag` 管线，不再绑定或声明 bloomResult。
+> 两种路径都通过动态 viewport/scissor 和现有 resize 流程。
+> `selftest-no-bloom` / `selftest-no-bloom-no-ssao` 现在必须出现
+> `[TD06] Bloom disabled: skipping Bright + Down + Up passes`，且 stderr 0 字节。
+> 同机 Debug、3000 帧实测：Bloom 开 455 FPS，新关闭路径 531 FPS（约 +17%），
+> 两轮 stderr 均为 0。
 
 ### 现状
 
@@ -229,6 +287,13 @@ PresentPass 准备两套描述符绑定：
 
 ## 8. TD-07（P2）ComputeProbePass 的固定开销
 
+> **状态：已完成（2026-10-17）**。`ComputeProbePass` 默认关闭，不再注册两个
+> compute dispatch 和 CPU 读回；输出一次
+> `[TD07] ComputeProbe disabled: no probe dispatches or CPU readback`。
+> 新增 `--compute-test` 显式启用独立回归，仍会输出
+> `[D5] async compute probe verified: ...`。同机 Debug、3000 帧实测：
+> 默认 486 FPS，开启探针 455 FPS（约 +6.5%）；两轮 stderr 均为 0。
+
 ### 现状
 
 `ComputeProbePass` 是 D-5 的验收探针，每帧固定跑两个 compute dispatch + CPU 读回。
@@ -248,6 +313,13 @@ PresentPass 准备两套描述符绑定：
 ---
 
 ## 9. TD-08（P2）遗留代码与废弃接口
+
+> **状态：已完成（2026-10-17）**。删除 `src/Core/Descriptor.h/.cpp`；删除
+> `light_cube.*`、`shader.*` 和 shader 源目录全部旧 `.spv`；移除 `Swapchain` 的
+> depth/Framebuffer 死接口与成员；清理 `IBLBaker` 的 RenderPass/Framebuffer 残留
+> 和空的 `createRenderPasses()`；删除 `Renderer` 的 `#if 0` 旧 RenderPass 接口。
+> `tools/Validate.ps1` 新增 TD-08 dead-file guard，防止这些文件/源目录 `.spv`
+> 重新混进仓库。干净 build + 全部回归通过。
 
 ### 现状
 
@@ -272,6 +344,12 @@ PresentPass 准备两套描述符绑定：
 
 ## 10. TD-09（P2）EngineConfig 版本迁移
 
+> **状态：已完成（2026-10-17）**。配置当前版本提升到 2，加载时显式执行
+> v0 -> v1（把旧顶层字段收进 `engineSettings`）-> v2（补齐 renderScale/planned）。
+> 迁移前把原文件复制为 `.vN.bak`，迁移成功后原子写回。未来版本、损坏 JSON、
+> 非法 version 都会保留原文件；`save()` 对不可读的已有配置直接拒绝覆盖。
+> 新增 `--config-test`，覆盖 v0->v2 迁移、备份、损坏文件与 version 999 不覆盖。
+
 ### 现状
 
 `config/engine.json` 有一个 `version: 1` 字段，但加载代码完全不检查它。
@@ -291,12 +369,15 @@ PresentPass 准备两套描述符绑定：
 
 ## 11. 建议解决顺序
 
-1. **TD-01**：先把构建与验证做成可重复的一条命令。
-2. **TD-02**：补 compute/graphics 跨队列同步，这是后续 GPU 驱动渲染的前置条件。
-3. **TD-03**：补 swapchain 重建，解锁动态分辨率和窗口缩放。
-4. **TD-04 / TD-05**：处理材质生命周期与子资源语义校验。
-5. **TD-06 / TD-07**：性能回收，去掉不必要的 pass 和探针成本。
-6. **TD-08 / TD-09**：清理与配置迁移。
+1. ~~**TD-01**：先把构建与验证做成可重复的一条命令。~~ 已完成。
+2. ~~**TD-02**：补 compute/graphics 跨队列同步，这是后续 GPU 驱动渲染的前置条件。~~ 已完成。
+3. ~~**TD-03**：补 swapchain 重建，解锁动态分辨率和窗口缩放。~~ 已完成。
+4. ~~**TD-04**：处理材质生命周期。~~ ~~**TD-05**：子资源语义校验。~~ 均已完成；
+   下一项从 **TD-06** 开始。
+5. ~~**TD-06**：关闭 Bloom 的固定 pass 开销。~~ ~~**TD-07**：ComputeProbePass
+   固定开销。~~ 均已完成。
+6. ~~**TD-08**：遗留代码与废弃接口。~~ ~~**TD-09**：配置版本迁移。~~ 已完成；
+   当前技术债清单已清空。
 
 每修完一项，至少跑：
 

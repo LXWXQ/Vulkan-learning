@@ -32,6 +32,7 @@ public:
 
     void init() override;
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
+    void resize(VkExtent2D extent) override;
     std::string getName() const override { return "Present"; }
 
     // ImGui 的"构建 UI + Render()"必须在 Present 之前完成，
@@ -49,6 +50,8 @@ private:
 
     void createDescriptorLayout();
     void createPipeline();
+    void updateBloomDescriptor(uint32_t frame);
+    void updateNoBloomDescriptor(uint32_t frame);
 
     Device& device;
     Swapchain& swapchain;
@@ -58,9 +61,14 @@ private:
 
     VkSampler sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout noBloomSetLayout = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kFramesInFlight> sets{};
+    std::array<VkDescriptorSet, kFramesInFlight> noBloomSets{};
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout noBloomPipelineLayout = VK_NULL_HANDLE;
+    VkFormat pipelineSwapchainFormat = VK_FORMAT_UNDEFINED;
     std::unique_ptr<Pipeline> pipeline;
+    std::unique_ptr<Pipeline> noBloomPipeline;
 
     ImGuiSystem* imguiSystem = nullptr;
 };

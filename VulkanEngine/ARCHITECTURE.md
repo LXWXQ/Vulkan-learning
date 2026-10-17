@@ -50,12 +50,11 @@ VulkanEngine/
 ├── Resources/
 │   ├── Models/                     # DamagedHelmet/ Sponza/glTF/ + 若干 .obj
 │   └── Texture/                    # environment.hdr 等
-├── shaders/                        # GLSL 源码（+ 几个已废弃的 shader，见 AI_Readme 第 8 节）
+├── shaders/                        # GLSL 源码（只保留运行时在用的 shader）
 ├── RTR4_Notes/                     # 学习笔记，与引擎无关
 └── src/
     ├── Core/
     │   ├── Application.h/.cpp        # FirstApp：构造顺序 + 帧循环
-    │   ├── Descriptor.h/.cpp         # 【死代码】DescriptorAllocator/Builder
     │   ├── DescriptorManager.h/.cpp  # Set 0 全局 + Set 1 材质槽位
     │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
     │   ├── JobSystem.h/.cpp         # CPU worker pool / JobHandle / parallelFor
@@ -292,8 +291,7 @@ hdrScene ──bright──> L0 ──down──> L1 ──down──> L2 ──
 |------|--------|------|--------|
 | G-Buffer 4 色 + 深度 | `GBuffer` | `GBuffer`（`FirstApp::gBuffer`） | `~GBuffer()`（`vmaDestroyImage` + `vkDestroyImageView`） |
 | G-Buffer 采样器 | `GBuffer` | 同上 | `~GBuffer()` |
-| 交换链 + ImageView + **depth 资源** | `Swapchain` | `Swapchain` | `~Swapchain()`（depth 已无人使用，但仍在分配/销毁） |
-| 交换链 `VkFramebuffer` | —（`createFramebuffers` 已无人调用） | — | 析构里的循环空转 |
+| 交换链 + ImageView | `Swapchain` | `Swapchain` | `~Swapchain()`（TD-08 已移除 depth / Framebuffer 死接口） |
 | 全局 UBO | `FirstApp::createUniformBuffers()` | `FirstApp`（裸 `VkBuffer` + `VmaAllocation`） | `FirstApp::~FirstApp()` 手动 `vmaDestroyBuffer` |
 | 环境 HDR 纹理 | `Texture` | `FirstApp::environmentTex`（`unique_ptr`） | `~Texture()` |
 | IBL 三件套（2 个 cubemap + 1 个 LUT image） | `IBLBaker::createTargets()` | `IBLBaker` | `~IBLBaker()` |
@@ -585,14 +583,15 @@ N 个 renderFinished VkSemaphore         // 每个交换链图像一枚
 | `bloom_bright.frag` | frag | Bloom | 一张 sampler2D（`hdrScene`）+ push（threshold/knee/intensity） | `bloomLevels[0]` | Rec.709 亮度 + **soft knee** 二次过渡；高度 ~37 行 |
 | `bloom_down.frag` | frag | Bloom | 一张 sampler2D（上一级）+ push（srcTexelSize/karisAverage） | 下一级 | 13 抽样 dual-filter；首级 Karis 加权抗萤火虫 |
 | `bloom_up.frag` | frag | Bloom | 一张 sampler2D（粗一级）+ push（srcTexelSize/radius） | 细一级（**加法混合**） | 3×3 帐篷滤波（角 1/16、边 1/8、心 1/4） |
-| `present.frag` | frag | Present | `hdrScene` + `bloomResult` + push（exposure/bloomIntensity/bloomEnabled） | 交换链 | ACES Filmic（Narkowicz 2015）+ `pow(1/2.2)`；**ACES 的 clamp 是整条链路的终点** |
+| `present.frag` | frag | Present | `hdrScene` + `bloomResult` + push（exposure/bloomIntensity/bloomEnabled） | 交换链 | Bloom 开启路径；ACES Filmic（Narkowicz 2015）+ `pow(1/2.2)` |
+| `present_no_bloom.frag` | frag | Present | 只采样 `hdrScene` + push | 交换链 | TD-06 Bloom 关闭路径；不绑定 bloomResult |
 | `ibl_capture.vert` | vert | IBLBaker（×4 共用） | 无 | `outUV` | 立方体面方向由 push 的 `faceIndex` 推出 |
 | `ibl_equirect_to_cube.frag` | frag | IBLBaker | 等距柱状 sampler2D + push | `envCube` 某一面 | `v.y = +1` → `uv.y = 0`（HDR 顶部是天顶，已用脚本验证） |
 | `ibl_irradiance.frag` | frag | IBLBaker | `envCube` samplerCube + push | `irradianceMap` | `sampleDelta = 0.025` 双重循环；`irradiance = π * Σ / N` |
 | `ibl_prefilter.frag` | frag | IBLBaker | `envCube` samplerCube + push | `prefilteredMap` 某级 mip | Hammersley + GGX 重要性采样 + 采样立体角估 mip；**必须能 `textureLod`** |
 | `ibl_brdf_lut.frag` | frag | IBLBaker | `inUV`（= NdotV, roughness） | `R16G16` (A, B) | 1024 采样；IBL 版 Smith 用 `k = a²/2`（与直接光不同） |
-| ~~`light_cube.vert/.frag`~~ | — | — | — | — | **无人引用的死代码** |
-| ~~`shader.vert/.frag`~~ | — | — | — | — | **无人引用的死代码**（早期教学 shader） |
+
+> TD-08 已删除废弃的 `light_cube.*`、`shader.*` 和源码目录里的旧 `.spv`。
 
 **编译约定**：`#version 450`；push constant 的**字段顺序和大小必须与 C++ 侧结构体严格一致**（`BloomPass::BrightPush` / `DownPush` / `UpPush`、`PresentPass::PresentPush`、`IBLBaker::PushConstants`、`SimplePushConstantData`、`SSAOUbo`）。`GlobalUbo` 额外有 `static_assert(offsetof(...))` 在编译期守住 std140 布局。
 
@@ -735,11 +734,11 @@ main()
 - **烘焙而不是运行时积分**：irradiance 的半球卷积是几万次采样/纹素，运行时做不可能。
 - **split-sum 而不是粗糙度系数近似**：老实现 `envSpecular *= (1.0 - roughness)` 能量完全不守恒（粗粗糙度时高光消失）。split-sum 把镜面积分拆成两个可预计算的项，运行时只有 2 次采样。实测过曝像素从 95.9% 降到 7.1%。
 
-### 决策 11：IBLBaker 保留 `VkRenderPass`/`VkFramebuffer` 的死代码
+### 决策 11：IBLBaker 使用 Vulkan 1.3 动态渲染
 
-这不是"设计"而是**迁移残留**：`IBLBaker` 在 D-1(b) 已经改成动态渲染（`renderFaces` / `renderBrdfLut` 都调 `vkCmdBeginRendering`），但 `createRenderPasses()` 变成了空函数、`makeFramebuffer()` / `createOffscreenRenderPass()` / `pendingFramebuffers` / `cubeRenderPass` / `lutRenderPass` 这些符号还留着。
+`IBLBaker` 的 `renderFaces` / `renderBrdfLut` 直接使用 `vkCmdBeginRendering`，不再创建 `VkRenderPass` / `VkFramebuffer`。
 
-保留了 `pendingFramebuffers` 的**注释**（"不能在录制完就销毁 Framebuffer"）作为历史教训的记录 —— 这条经验在动态渲染下依然适用（录制完就销毁 image view 一样是错的）。清理时建议只删代码、把注释移到合适的地方。
+TD-08 已删除迁移时期留下的 `createOffscreenRenderPass()`、`makeFramebuffer()`、`pendingFramebuffers`、`cubeRenderPass` / `lutRenderPass` 和空 `createRenderPasses()`。原则仍然保留：命令缓冲引用的 image/view/buffer 必须活到提交完成之后。
 
 ### 决策 12：材质槽位用「一次性预分配 + 空闲栈」，而不是动态描述符池
 
@@ -824,8 +823,10 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
   后者是**资源**不是**设置**，恢复它们涉及资产路径、加载顺序、失败回退，是另一件事。
 - **UI 文字必须是 ASCII**：ImGui 内置字体只有 ASCII 字形，中文会整条渲染成 `???`。
   所以 `EngineConfig::getLastStatus()` 返回的是英文 —— 这是刻意的，不是遗漏。
-- **代价 / 局限**：没有版本迁移逻辑（`version` 字段写进去了但还没用）；
-  没有"多套预设"（以后做画质档位需要扩展成目录 + 名字）。
+- **版本迁移（TD-09）**：当前 `version = 2`。v0 -> v1 把旧顶层字段收进 `engineSettings`，
+  v1 -> v2 补齐 `renderScale`/`planned`；迁移前复制 `.vN.bak`，损坏 JSON / 未来版本 /
+  非法 version 不覆盖原文件，`save()` 对不可读配置直接拒绝。
+- **代价 / 局限**：没有"多套预设"（以后做画质档位需要扩展成目录 + 名字）。
 
 ### 决策 20：把"瞬时资源必须有人写"做成渲染图的硬校验（W2）
 
@@ -889,7 +890,7 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
 | 5 | ~~瞬时资源"必须每帧都有人写"~~ → W2 覆盖 image，**D-5 已扩展到 buffer**；单个 mip/层仍未细分 | mip/层独立读写时可能有盲区 | 有需求时补 |
 | 6 | glTF 几何烘焙到世界空间，丢失内部节点层级；entity 级 Transform 已可用，但不能单独驱动 Sponza 内部节点 | 阻塞局部动态物体 / 实例化；开放世界资产需要保留 node-instance 层级 | 地形/体素主功能前或资产管线升级时 |
 | 7 | `LightingPass` 兼任"导入交换链" | Pass 职责不对称，init 顺序有隐式依赖 | 清理类 |
-| 8 | 遗留代码：`Descriptor.h/.cpp`（**有意保留**，文件头已注明）、`light_cube.*`、`shader.*`、`Swapchain` 的 depth/Framebuffer、`IBLBaker` 的 RenderPass/Framebuffer 残留 | 增加阅读成本 | 清理类 |
+| 8 | ~~遗留代码：`Descriptor.h/.cpp`、`light_cube.*`、`shader.*`、`Swapchain` depth/Framebuffer、`IBLBaker` RenderPass/Framebuffer 残留~~ → ✅ TD-08 已清理，并加 dead-file guard | — | ✅ 已完成 |
 | 9 | 自检开关只覆盖 bloom / ssao 两个 Pass | 新增可关闭的 Pass 时，那条分支就是验证盲区（要照第 3.6 节加参数） | 加新 Pass 时照做 |
 | 10 | `EngineConfig` 只持久化 `EngineSettings` + 相机位姿 | 场景/模型/材质等"资源类"状态不落盘（这是刻意的 —— 见决策 18，但将来要加"恢复上次场景"就得扩展） | 有需求时 |
 | 11 | **"关闭 Bloom"仍有 7 个全屏 Pass 的固定开销**（W2 引入） | 关掉 Bloom 并不省 GPU；在低端卡/移动端会显得"关了没变快" | Bloom 变重时改两套描述符绑定 |

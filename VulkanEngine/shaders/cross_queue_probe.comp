@@ -1,0 +1,69 @@
+#version 450
+
+// TD-02 跨队列验收 compute 着色器。
+// mode 0：compute 生成一段确定性 SSBO，随后由 graphics pass 消费（C->G）。
+// mode 1：读取 graphics 写好的 storage image，写回一个像素，并把校验和写入
+//         host-visible buffer，供 CPU 在后续帧验证（G->C）。
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) buffer ProbeData
+{
+    uint values[];
+} dataBuffer;
+
+layout(set = 0, binding = 1, std430) buffer ProbeResult
+{
+    uint magic;
+    uint frameNumber;
+    uint direction;
+    uint checksum;
+    uint count;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+} resultBuffer;
+
+layout(set = 0, binding = 2, r32ui) uniform uimage2D probeImage;
+
+layout(push_constant) uniform Push
+{
+    uint mode;
+    uint frameNumber;
+    uint count;
+    uint pad;
+} pc;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+
+    if (pc.mode == 0u)
+    {
+        if (index < pc.count)
+            dataBuffer.values[index] = index * 1664525u + pc.frameNumber * 1013904223u;
+        return;
+    }
+
+    // 单 invocation 串行读完整张图，避免原子操作引入顺序不确定性。
+    if (pc.mode == 1u && index == 0u)
+    {
+        const ivec2 extent = imageSize(probeImage);
+        uint sum = 0u;
+        for (int y = 0; y < extent.y; ++y)
+            for (int x = 0; x < extent.x; ++x)
+                sum += imageLoad(probeImage, ivec2(x, y)).r;
+
+        const uvec4 first = imageLoad(probeImage, ivec2(0, 0));
+        imageStore(probeImage, ivec2(0, 0), first + uvec4(1u, 0u, 0u, 0u));
+
+        resultBuffer.magic = 0x54D02001u;
+        resultBuffer.frameNumber = pc.frameNumber;
+        resultBuffer.direction = 1u;
+        resultBuffer.checksum = sum;
+        resultBuffer.count = uint(extent.x * extent.y);
+        resultBuffer.pad0 = 0u;
+        resultBuffer.pad1 = 0u;
+        resultBuffer.pad2 = 0u;
+    }
+}

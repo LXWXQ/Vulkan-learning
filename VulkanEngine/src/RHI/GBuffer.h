@@ -42,6 +42,9 @@ public:
     GBuffer(const GBuffer&) = delete;
     GBuffer& operator=(const GBuffer&) = delete;
 
+    // TD-03: recreate attachments at a new extent. Caller must make the GPU idle.
+    void resize(VkExtent2D extent);
+
     // Getters：供 GeometryPass 导入渲染图、以及全局描述符集使用
     const FrameBufferAttachment& getPosition() const { return position; }
     const FrameBufferAttachment& getNormal() const { return normal; }

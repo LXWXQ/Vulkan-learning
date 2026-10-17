@@ -3,6 +3,8 @@
 #include <vector>
 #include <cstdint>
 #include <array>
+#include <deque>
+#include <functional>
 #include "Core/FrameInFlight.h"
 #include "RHI/Device.h"
 #include "RHI/GBuffer.h"
@@ -63,12 +65,15 @@ public:
 		const VkDescriptorImageInfo& roughness);
 	uint32_t allocateMaterialSet(const Material& material);
 
-	// 归还槽位。越界或重复归还都会被安全忽略。
-	//
-	// ⚠️ bindless 之后归还语义变了：槽位被复用时是**改写数组里那个下标的内容**，
-	// 而 GPU 可能还在读它。当前调用方只在初始化阶段分配（此时设备空闲），
-	// 所以没问题；D-4 起这里先做 vkDeviceWaitIdle 保证安全。热路径若需回收，应升级为 timeline 延迟回收
-	// 或改用 VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT + 双缓冲。
+	// TD-04: defer slot reuse until the graphics timeline proves GPU use is done.
+	void setFrameTimelineCallbacks(std::function<uint64_t()> completed,
+		std::function<void(uint64_t)> waitUntil,
+		std::function<uint64_t()> lastSubmitted);
+	void collectMaterialGarbage();
+	uint32_t getPendingMaterialReleaseCount() const { return static_cast<uint32_t>(deferredMaterialReleases.size()); }
+
+	// 归还槽位。越界或重复归还都会被安全忽略。不会阻塞设备。
+	// 槽位先进入 deferredMaterialReleases，等 graphics timeline 确认相关提交退休。
 	void releaseMaterialSet(uint32_t index);
 
 	// bindless 之后材质只有一个 set（不再是每个材质一个）。
@@ -104,6 +109,13 @@ private:
 		const VkDescriptorImageInfo& normal,
 		const VkDescriptorImageInfo& metallic,
 		const VkDescriptorImageInfo& roughness);
+	void reclaimReleasedMaterialSlots();
+
+	struct DeferredMaterialRelease
+	{
+		uint32_t slot = 0;
+		uint64_t safeAfterFrame = 0;
+	};
 
 	Device* device = nullptr;
 	VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -119,6 +131,12 @@ private:
 	VkDescriptorSet materialSet = VK_NULL_HANDLE;
 	uint32_t materialCapacity = 0;
 
-	std::vector<bool> slotInUse;                 // 槽位占用标记
+	std::vector<bool> slotInUse;                 // 槽位占用标记（含等待回收）
+	std::vector<bool> slotPendingRelease;        // 已归还但还没到安全帧
 	std::vector<uint32_t> freeSlots;             // 空闲槽位栈，后进先出 -> O(1) 分配/归还
+	std::deque<DeferredMaterialRelease> deferredMaterialReleases;
+
+	std::function<uint64_t()> completedFrameQuery;
+	std::function<void(uint64_t)> frameWait;
+	std::function<uint64_t()> lastSubmittedFrameQuery;
 };

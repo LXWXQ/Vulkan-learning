@@ -11,6 +11,9 @@
 **家庭工作区：D-4 / D-5 已提交（`cd7d695`），D-6 Job System + D-7 EnTT ECS 已完成（本地未提交）。2 帧在飞 + 异步 compute + CPU worker pool + EnTT 场景/Transform 层级/空间索引；四种渲染自检组合各跑 120 帧，stderr 全部 0 字节。**
 
 > 当前 HEAD 是 `cd7d695`（D-4 / D-5）；D-6 / D-7 改动在工作区，尚未 commit。
+>
+> **本次会话追加（2026-10-17）**：TD-01 ~ TD-09 全部完成并通过
+> `tools/Validate.ps1` 回归；技术债清单已清空，后续回到 `FUTURE_PLAN.md` 的主功能路线。
 
 ## 0.1 新对话入口（优先读这里）
 
@@ -85,6 +88,11 @@ adb622d  D-2: PresentPass + HDR 中间目标 + Bloom
 ---
 
 ## 3. 怎么验证（这是这个项目最重要的工作习惯）
+
+> **TD-01 起优先执行仓库内的 `tools/Validate.ps1`**：它会准备依赖、全新 configure/build，
+> 并跑完 jobtest、四种 selftest、TD-02 跨队列回归和 TD-03 窗口缩放回归；
+> 任何一步 stderr 非空都会失败。
+> 下面 `%TEMP%\sentinel\` 的描述保留作历史排查参考，不再是主验证入口。
 
 ### 3.1 构建
 
@@ -251,10 +259,26 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 当前不再按 D 里程碑继续推进，转入专门的技术债阶段。优先级与验收标准见
 `TECH_DEBT.md`：
 
-1. **TD-01**：依赖与验证脚本可复现。
-2. **TD-02**：compute/graphics 跨队列 producer/consumer 同步。
-3. **TD-03**：窗口缩放 / swapchain 重建。
-4. 后续按 `TECH_DEBT.md` 的 P1/P2 顺序处理。
+1. ~~**TD-01**：依赖与验证脚本可复现。~~ 已完成：新增 `tools/SetupDependencies.ps1`、
+   `tools/Validate.ps1`、`tools/README.md`，一条命令完成依赖 + 全新构建 + 全部自检。
+2. ~~**TD-02**：compute/graphics 跨队列 producer/consumer 同步。~~ 已完成：
+   `crossQueue` CONCURRENT 资源、RenderGraph 单向依赖推导/环检测、Renderer timeline
+   submit 顺序，以及 `--cross-queue-test` 双方向 GPU 验收探针。
+3. ~~**TD-03**：窗口缩放 / swapchain 重建。~~ 已完成：可缩放窗口、帧边界
+   swapchain/ImGui/semaphore 重建、RenderGraph 原位 resize、动态分辨率接口与
+   `--resize-test` 回归。
+4. ~~**TD-04**：材质槽位归还的 `vkDeviceWaitIdle`。~~ 已完成：graphics timeline
+   延迟回收队列 + `--material-stress` 150 轮回归。
+5. ~~**TD-05**：RenderGraph 子资源语义校验。~~ 已完成：mip/layer 独立状态、
+   subresource barrier、buffer 区间覆盖校验与正反例回归。
+6. ~~**TD-06**：清理 Bloom 关闭时的固定 pass 开销。~~ 已完成：关闭时跳过
+   7 个 Bloom Pass，Present 使用独立单输入管线。
+7. ~~**TD-07**：ComputeProbePass 固定开销。~~ 已完成：默认关闭，`--compute-test`
+   保留独立 GPU 写 + CPU 读回回归。
+8. ~~**TD-08**：遗留代码 / 废弃接口。~~ 已完成：删除 Descriptor 旧系统、废弃
+   shader/源目录 `.spv`、Swapchain depth/Framebuffer、IBLBaker 残留和 Renderer `#if 0`。
+9. ~~**TD-09**：配置版本迁移。~~ 已完成：v0 -> v1 -> v2 显式迁移、备份、
+   损坏/未来版本保护、`--config-test` 回归。技术债清单清空。
 
 主功能路线（地形 / 体素 / GPU-driven rendering / 资产管线）见 `FUTURE_PLAN.md`。
 
@@ -265,7 +289,7 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 | # | 内容 | 何时处理 |
 |---|---|---|
 | 17 | **"关闭 Bloom"仍有 7 个全屏 Pass 的固定开销** —— W2 为了让语义校验的不变量成立，把 Bloom 关闭从"跳过 Pass"改成"强度置零"。视觉等价，但 Pass 照跑，所以关掉 Bloom 并不省 GPU | Bloom 变重时改两套描述符绑定 |
-| 18 | `EngineConfig` 没有版本迁移、没有多套预设（`version` 字段写了但没人读） | 有需求时 |
+| 18 | ~~`EngineConfig` 没有版本迁移~~ → **TD-09 已修**：显式 v0->v1->v2 迁移 + 备份 + 损坏保护；多套预设仍未实现 | 有需求时 |
 | 19 | ~~W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip/层~~ → **D-5 已扩展到 storage buffer**；单个 mip/层仍待有需要时补 | ✅ 已完成主体 |
 | 20 | 验证脚本的两个前提（正常关窗 / 窗口在前台）没有自动化保护，脚本在 `%TEMP%` 下不在版本库 | 建议尽早把脚本迁进仓库 |
 | 21 | bindless 的 `normalMaps` 数组绑了但没被采样（切线空间法线贴图仍有意关闭），256 材质白占 256 个描述符 | 启用切线法线贴图时 |
