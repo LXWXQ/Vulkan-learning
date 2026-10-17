@@ -6,6 +6,7 @@
 #include "Render/BloomPass.h"
 #include "Render/PresentPass.h"
 #include "Render/SSAOPass.h"
+#include "Render/ComputeProbePass.h"
 #include <stdexcept>
 #include <iostream>
 
@@ -28,10 +29,20 @@ FirstApp::FirstApp()
 	initWindow(loadedSettings.windowTitle);
 	vulkanDevice = std::make_unique<Device>(window);
 
-	VkExtent2D extent{ WIDTH, HEIGHT };
-	vulkanSwapchain = std::make_unique<Swapchain>(*vulkanDevice, extent);
+	// 请求尺寸只是期望值。surface 可能因为标题栏/任务栏把它裁小，
+	// 交换链创建时会采用 surface 的 currentExtent；渲染资源必须跟着实际尺寸走。
+	VkExtent2D requestedExtent{ WIDTH, HEIGHT };
+	vulkanSwapchain = std::make_unique<Swapchain>(*vulkanDevice, requestedExtent);
+	const VkExtent2D renderExtent = vulkanSwapchain->getSwapChainExtent();
 	renderer = std::make_unique<Renderer>(*vulkanDevice, *vulkanSwapchain);
-	gBuffer = std::make_unique<GBuffer>(*vulkanDevice, extent);
+
+	// D-4：每个 frame slot 一套 G-Buffer。两帧同时在飞时共享一套会跨帧读写冲突。
+	std::array<GBuffer*, kFramesInFlight> gBufferPtrs{};
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+	{
+		gBuffers[frame] = std::make_unique<GBuffer>(*vulkanDevice, renderExtent);
+		gBufferPtrs[frame] = gBuffers[frame].get();
+	}
 
 	// D-1(b)：渲染图必须在各 Pass 之前创建 —— Pass 的 init() 会往里注册资源
 	renderGraph = std::make_unique<RenderGraph>(*vulkanDevice);
@@ -67,11 +78,11 @@ FirstApp::FirstApp()
 	createUniformBuffers();
 	initMaterials();
 
-	auto geoPass = std::make_unique<GeometryPass>(*vulkanDevice, *gBuffer, *renderGraph, *renderResources,
+	auto geoPass = std::make_unique<GeometryPass>(*vulkanDevice, gBufferPtrs, *renderGraph, *renderResources,
 		descriptorManager->getGlobalSetLayout(), descriptorManager->getMaterialSetLayout());
 	auto ssaoPass = std::make_unique<SSAOPass>(*vulkanDevice, *renderGraph, *renderResources,
 		descriptorManager->getGlobalSetLayout(), descriptorManager.get());
-	auto lightPass = std::make_unique<LightingPass>(*vulkanDevice, *gBuffer, *vulkanSwapchain,
+	auto lightPass = std::make_unique<LightingPass>(*vulkanDevice, *gBuffers[0], *vulkanSwapchain,
 		*renderGraph, *renderResources, descriptorManager->getGlobalSetLayout());
 	// D-2 的两个新成员：Bloom 只负责在 HDR 图上生成辉光，
 	// PresentPass 负责把 HDR + 辉光变成最终显示值并叠加 ImGui。
@@ -79,6 +90,9 @@ FirstApp::FirstApp()
 		descriptorManager.get());
 	auto presentPass = std::make_unique<PresentPass>(*vulkanDevice, *vulkanSwapchain, *renderGraph,
 		*renderResources, descriptorManager.get());
+
+	auto computeProbePass = std::make_unique<ComputeProbePass>(*vulkanDevice, *renderGraph,
+		descriptorManager.get());
 
 	PresentPass* presentPassPtr = presentPass.get();
 	SSAOPass* ssaoPassPtr = ssaoPass.get();
@@ -88,6 +102,7 @@ FirstApp::FirstApp()
 	renderPipeline.addPass(std::move(lightPass));
 	renderPipeline.addPass(std::move(bloomPass));
 	renderPipeline.addPass(std::move(presentPass));
+	renderPipeline.addPass(std::move(computeProbePass));
 
 	renderPipeline.initAll();
 
@@ -100,7 +115,7 @@ FirstApp::FirstApp()
 		RenderGraph::TextureDesc d;
 		d.name = name;
 		d.format = fmt;
-		d.extent = { WIDTH, HEIGHT };
+		d.extent = vulkanSwapchain->getSwapChainExtent();
 		d.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
 		d.arrayLayers = layers;
 		d.flags = flags;
@@ -131,8 +146,16 @@ FirstApp::FirstApp()
 	VkDescriptorImageInfo brdfLutInfo{ iblBaker->getBrdfLutSampler(), iblBaker->getBrdfLutView(),
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-	descriptorManager->buildGlobalSet(globalUboBuffer, envInfo, *gBuffer,
-		ssaoPassPtr->getOutputSampler(), ssaoPassPtr->getOutputImageView(),
+	std::array<VkImageView, kFramesInFlight> ssaoViews{};
+	std::array<const GBuffer*, kFramesInFlight> constGBufferPtrs{};
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+	{
+		ssaoViews[frame] = ssaoPassPtr->getOutputImageView(frame);
+		constGBufferPtrs[frame] = gBufferPtrs[frame];
+	}
+
+	descriptorManager->buildGlobalSet(globalUboBuffers, envInfo, constGBufferPtrs,
+		ssaoPassPtr->getOutputSampler(), ssaoViews,
 		irradianceInfo, prefilteredInfo, brdfLutInfo);
 
 	// D-1(b)：ImGui 改用动态渲染，只需要交换链颜色格式。
@@ -190,8 +213,12 @@ FirstApp::~FirstApp()
 	vulkanSwapchain.reset();
 
 	// 3) 其余 GPU 资源
-	vmaDestroyBuffer(vulkanDevice->getVmaAllocator(), globalUboBuffer, globalUboAllocation);
-	globalUboBuffer = VK_NULL_HANDLE;
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+	{
+		if (globalUboBuffers[frame] != VK_NULL_HANDLE)
+			vmaDestroyBuffer(vulkanDevice->getVmaAllocator(),
+				globalUboBuffers[frame], globalUboAllocations[frame]);
+	}
 
 	descriptorManager->cleanup();
 	scene->cleanup();
@@ -200,7 +227,8 @@ FirstApp::~FirstApp()
 	iblBaker.reset();
 	renderGraph.reset();          // 渲染图持有大量 image/view，必须在 Device 之前
 	renderResources.reset();
-	gBuffer.reset();
+	for (auto& gBuffer : gBuffers)
+		gBuffer.reset();
 	renderer.reset();
 	descriptorManager.reset();
 	scene.reset();
@@ -223,24 +251,32 @@ void FirstApp::initWindow(const std::string& title)
 
 void FirstApp::createUniformBuffers()
 {
-	VkDeviceSize bufferSize = sizeof(GlobalUbo);
-	VkBufferCreateInfo bufferInfo{};
-	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = bufferSize;
-	bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+	// D-4：每帧槽位一份 UBO。单份 UBO 在 CPU/GPU 重叠时会被下一帧的 memcpy
+	// 覆盖，GPU 可能读到新旧混合的数据。
+	static const char* const names[kFramesInFlight] = { "GlobalUbo.Frame0", "GlobalUbo.Frame1" };
 
-	VmaAllocationCreateInfo allocInfo{};
-	allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-	allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-	allocInfo.flags |= sentinel_vmaNameFlag();
-	allocInfo.pUserData = const_cast<char*>("GlobalUbo");   // 泄漏报告里显示这个名字
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+	{
+		VkDeviceSize bufferSize = sizeof(GlobalUbo);
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = bufferSize;
+		bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 
-	vmaCreateBuffer(vulkanDevice->getVmaAllocator(), &bufferInfo, &allocInfo,
-		&globalUboBuffer, &globalUboAllocation, nullptr);
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+		allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		allocInfo.flags |= sentinel_vmaNameFlag();
+		allocInfo.pUserData = const_cast<char*>(names[frame]);
 
-	VmaAllocationInfo info;
-	vmaGetAllocationInfo(vulkanDevice->getVmaAllocator(), globalUboAllocation, &info);
-	uboMapped = info.pMappedData;
+		if (vmaCreateBuffer(vulkanDevice->getVmaAllocator(), &bufferInfo, &allocInfo,
+			&globalUboBuffers[frame], &globalUboAllocations[frame], nullptr) != VK_SUCCESS)
+			throw std::runtime_error("GlobalUbo: per-frame buffer creation failed");
+
+		VmaAllocationInfo info;
+		vmaGetAllocationInfo(vulkanDevice->getVmaAllocator(), globalUboAllocations[frame], &info);
+		uboMapped[frame] = info.pMappedData;
+	}
 }
 
 void FirstApp::loadAllPBRTextures()
@@ -438,6 +474,9 @@ void FirstApp::render(float dt)
 	{
 		scene->getTelemetry().reset();
 
+		// beginFrame 已确认本 frame slot 的上一轮 GPU 工作完成，可以安全覆写 UBO。
+		const uint32_t frameInFlight = renderer->getCurrentFrameInFlightIndex();
+
 		GlobalUbo ubo{};
 		ubo.projectionView = scene->getCamera().getProjection() * scene->getCamera().getView();
 		ubo.cameraPos = glm::vec4(scene->cameraObject.transform.translation, 1.0f);
@@ -446,14 +485,17 @@ void FirstApp::render(float dt)
 		ubo.numLights = 0;
 		ubo.exposure = scene->getSettings().exposure;
 
-		memcpy(uboMapped, &ubo, sizeof(ubo));
+		memcpy(uboMapped[frameInFlight], &ubo, sizeof(ubo));
 		// 持久映射的 UBO 不保证落在 HOST_COHERENT 内存，必须显式 flush，
 		// 否则 GPU 可能读到上一帧的旧数据（对 non-coherent 堆是未定义行为）。
 		// vmaFlushAllocation 对 coherent 内存是空操作，可以无条件调用。
-		vmaFlushAllocation(vulkanDevice->getVmaAllocator(), globalUboAllocation, 0, sizeof(ubo));
+		vmaFlushAllocation(vulkanDevice->getVmaAllocator(),
+			globalUboAllocations[frameInFlight], 0, sizeof(ubo));
 
 		FrameInfo frameInfo{
+			frameInFlight,
 			renderer->getCurrentImageIndex(),
+			renderer->getFrameNumber(),
 			dt,
 			commandBuffer,
 			scene->getSettings(),
@@ -461,7 +503,7 @@ void FirstApp::render(float dt)
 			scene->getGameObjects(),
 			scene->getCamera().getProjection(),
 			scene->getCamera().getView(),
-			globalUboBuffer,
+			globalUboBuffers[frameInFlight],
 			descriptorManager.get(),
 			&scene->cameraObject,
 			&scene->getCameraController()
@@ -479,10 +521,10 @@ void FirstApp::render(float dt)
 
 		// D-1(b)：所有 Pass 把自己的工作声明进渲染图，
 		// 屏障、布局转换、vkCmdBeginRendering 全部由渲染图负责。
-		renderGraph->beginFrame(commandBuffer);
+		renderGraph->beginFrame(commandBuffer, renderer->getComputeCommandBuffer());
 		renderPipeline.registerAll(*renderGraph, frameInfo);
 		// 渲染完成 -> 把这张交换链图像转入 PRESENT_SRC_KHR 供 present
-		renderGraph->presentTransition(renderResources->swapchainImages[frameInfo.frameIndex]);
+		renderGraph->presentTransition(renderResources->swapchainImages[frameInfo.swapchainImageIndex]);
 		renderGraph->endFrame();
 
 		renderer->endFrame();

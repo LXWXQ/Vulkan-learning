@@ -10,10 +10,12 @@ namespace
     // 「写」访问位。用于判断是否需要屏障：写->任何 都是 hazard。
     constexpr VkAccessFlags2 kWriteBits =
         VK_ACCESS_2_SHADER_WRITE_BIT |
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_2_TRANSFER_WRITE_BIT |
-        VK_ACCESS_2_HOST_WRITE_BIT;
+        VK_ACCESS_2_HOST_WRITE_BIT |
+        VK_ACCESS_2_MEMORY_WRITE_BIT;
 
     bool isDepthFormat(VkFormat f)
     {
@@ -50,11 +52,20 @@ RenderGraph::~RenderGraph()
         if (e.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), e.view, nullptr);
         if (e.image != VK_NULL_HANDLE) vmaDestroyImage(device.getVmaAllocator(), e.image, e.allocation);
     }
+
+    for (BufferEntry& b : buffers)
+    {
+        if (!b.owned) continue;
+        if (b.buffer != VK_NULL_HANDLE)
+            vmaDestroyBuffer(device.getVmaAllocator(), b.buffer, b.allocation);
+    }
 }
 
-void RenderGraph::beginFrame(VkCommandBuffer commandBuffer)
+void RenderGraph::beginFrame(VkCommandBuffer graphicsCommandBuffer,
+                             VkCommandBuffer computeCommandBuffer)
 {
-    cmd = commandBuffer;
+    cmd = graphicsCommandBuffer;
+    computeCmd = computeCommandBuffer;
 
     for (std::unique_ptr<Pass>& p : passes)
         p.reset();
@@ -70,12 +81,24 @@ void RenderGraph::beginFrame(VkCommandBuffer commandBuffer)
         e.stage = VK_PIPELINE_STAGE_2_NONE;
         e.access = VK_ACCESS_2_NONE;
     }
+
+    for (BufferEntry& b : buffers)
+    {
+        if (b.desc.persistent) continue;
+        b.stage = VK_PIPELINE_STAGE_2_NONE;
+        b.access = VK_ACCESS_2_NONE;
+    }
 }
 
 void RenderGraph::endFrame()
 {
     if (cmd == VK_NULL_HANDLE)
         throw std::runtime_error("RenderGraph: 调用 endFrame 之前必须先 beginFrame");
+
+    const bool hasComputePass = std::any_of(passes.begin(), passes.end(),
+        [](const std::unique_ptr<Pass>& p) { return p->isCompute && p->enabled; });
+    if (hasComputePass && computeCmd == VK_NULL_HANDLE)
+        throw std::runtime_error("RenderGraph: 包含了 compute pass，但 beginFrame 没有提供 compute command buffer");
 
     // ---- 语义校验：先查"谁能读到没人写的东西"，再开始录制 ----
     // 放在最前面，是为了让错误在"这一帧的 GPU 命令还没提交"时就抛出来，
@@ -86,6 +109,8 @@ void RenderGraph::endFrame()
     {
         Pass& pass = *passPtr;
         if (!pass.enabled) continue;
+
+        const VkCommandBuffer passCmd = pass.isCompute ? computeCmd : cmd;
 
         // ---- 0) 同一个 Pass 里对同一张图可能声明了多次访问 ----
         // 典型是 Bloom 的上采样：它既要把粗级结果当纹理采样，
@@ -142,12 +167,47 @@ void RenderGraph::endFrame()
                     "\" 被当作存储图像，但创建时没有声明 STORAGE usage");
         }
 
+        std::vector<BufferAccess> bufferAccesses;
+        bufferAccesses.reserve(pass.bufferAccesses.size());
+        for (const BufferAccess& acc : pass.bufferAccesses)
+        {
+            if (!acc.buffer.valid()) continue;
+            auto it = std::find_if(bufferAccesses.begin(), bufferAccesses.end(),
+                [&](const BufferAccess& a) { return a.buffer.id == acc.buffer.id; });
+            if (it != bufferAccesses.end())
+                *it = acc;
+            else
+                bufferAccesses.push_back(acc);
+        }
+
+        for (const BufferAccess& acc : bufferAccesses)
+        {
+            if (acc.buffer.id >= buffers.size())
+            {
+                throw std::runtime_error("RenderGraph: Pass \"" + pass.name +
+                    "\" 引用了越界的 buffer 句柄");
+            }
+
+            const BufferEntry& be = buffers[acc.buffer.id];
+            if ((acc.access & (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) &&
+                !(be.desc.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT))
+            {
+                throw std::runtime_error("RenderGraph: buffer \"" + be.desc.name +
+                    "\" 被当作 storage buffer，但创建时没有声明 STORAGE_BUFFER usage");
+            }
+        }
+
+        if (pass.isCompute && (!pass.colors.empty() || !pass.depths.empty()))
+            throw std::runtime_error("RenderGraph: compute pass \"" + pass.name + "\" 不能声明颜色/深度附件");
+
         // ---- 1) 资源屏障：由声明自动推导 ----
         for (const Access& acc : accesses)
-            emitBarrierIfNeeded(acc);
+            emitBarrierIfNeeded(acc, passCmd);
+        for (const BufferAccess& acc : bufferAccesses)
+            emitBufferBarrierIfNeeded(acc, passCmd);
 
         // ---- 2) 动态渲染 ----
-        const bool raster = !pass.colors.empty() || !pass.depths.empty();
+        const bool raster = !pass.isCompute && (!pass.colors.empty() || !pass.depths.empty());
 
         if (raster)
         {
@@ -194,19 +254,19 @@ void RenderGraph::endFrame()
             info.pColorAttachments = colorInfos.empty() ? nullptr : colorInfos.data();
             info.pDepthAttachment = hasDepth ? &depthInfo : nullptr;
 
-            vkCmdBeginRendering(cmd, &info);
+            vkCmdBeginRendering(passCmd, &info);
 
             // viewport / scissor 在所有管线里都设成动态状态，必须显式设置
-            cmdSetFullViewportAndScissor(cmd, extent);
+            cmdSetFullViewportAndScissor(passCmd, extent);
         }
 
-        // ---- 3) 用户回调（真正的绘制）----
+        // ---- 3) 用户回调（真正的绘制 / dispatch）----
         if (pass.callback)
-            pass.callback(cmd);
+            pass.callback(passCmd);
 
         // ---- 4) 结束动态渲染 ----
         if (raster)
-            vkCmdEndRendering(cmd);
+            vkCmdEndRendering(passCmd);
 
         // ---- 5) 记录本 Pass 造成的最终状态，供下一个 Pass 推导屏障 ----
         for (const Access& acc : accesses)
@@ -216,12 +276,19 @@ void RenderGraph::endFrame()
             te.stage = acc.stage;
             te.access = acc.access;
         }
+        for (const BufferAccess& acc : bufferAccesses)
+        {
+            BufferEntry& be = buffers[acc.buffer.id];
+            be.stage = acc.stage;
+            be.access = acc.access;
+        }
     }
 
     for (std::unique_ptr<Pass>& p : passes)
         p.reset();
     passes.clear();
     cmd = VK_NULL_HANDLE;
+    computeCmd = VK_NULL_HANDLE;
 }
 
 void RenderGraph::validateWriteCoverage() const
@@ -236,13 +303,25 @@ void RenderGraph::validateWriteCoverage() const
     //   * 遇到写 -> 加入集合
     //   * 遇到读 -> 若不在集合里，说明这一帧到目前为止没人写过它
     // -----------------------------------------------------------------------
-    std::vector<bool> written(textures.size(), false);
-    std::vector<bool> pendingWrite(textures.size(), false);   // 本 Pass 内部的写
+    std::vector<bool> texWritten(textures.size(), false);
+    std::vector<bool> texPendingWrite(textures.size(), false);
+    std::vector<std::string> texLastWriter(textures.size());
 
-    // 谁写过（包括被跳过的 Pass"本来会写"）——用来让报错能指名道姓。
-    // 只说"没人写过"读者还得自己去翻是谁该写；直接告诉他
-    // "SSAO 本来是由 Pass X 写的，但它这一帧被跳过了"，才是可行动的报错。
-    std::vector<std::string> lastWriter(textures.size());
+    std::vector<bool> bufWritten(buffers.size(), false);
+    std::vector<bool> bufPendingWrite(buffers.size(), false);
+    std::vector<std::string> bufLastWriter(buffers.size());
+
+    // D-5：当前两条队列各自独立提交。若一个资源被一条队列写、又被另一条
+    // 队列读写，必须有跨队列 semaphore + ownership/布局同步；这个基础设施
+    // 尚未实现。先把它变成明确异常，避免静默数据竞争。
+    std::vector<bool> texGraphicsTouched(textures.size(), false);
+    std::vector<bool> texComputeTouched(textures.size(), false);
+    std::vector<bool> texGraphicsWritten(textures.size(), false);
+    std::vector<bool> texComputeWritten(textures.size(), false);
+    std::vector<bool> bufGraphicsTouched(buffers.size(), false);
+    std::vector<bool> bufComputeTouched(buffers.size(), false);
+    std::vector<bool> bufGraphicsWritten(buffers.size(), false);
+    std::vector<bool> bufComputeWritten(buffers.size(), false);
 
     for (const std::unique_ptr<Pass>& passPtr : passes)
     {
@@ -250,22 +329,33 @@ void RenderGraph::validateWriteCoverage() const
 
         // 这里有一个必须谨慎处理的地方：**被跳过的 Pass 也要参与"谁本该写"的统计**，
         // 否则报错时无法指出被跳过的那个写入者。但它不能算作"已经写过"。
-        std::fill(pendingWrite.begin(), pendingWrite.end(), false);
+        std::fill(texPendingWrite.begin(), texPendingWrite.end(), false);
         for (const ColorAttachment& ca : pass.colors)
             if (ca.texture.valid() && ca.texture.id < textures.size())
-                pendingWrite[ca.texture.id] = true;
+                texPendingWrite[ca.texture.id] = true;
         for (const DepthAttachment& da : pass.depths)
             if (da.texture.valid() && da.texture.id < textures.size())
-                pendingWrite[da.texture.id] = true;
+                texPendingWrite[da.texture.id] = true;
 
-        for (size_t i = 0; i < pendingWrite.size(); ++i)
+        std::fill(bufPendingWrite.begin(), bufPendingWrite.end(), false);
+        for (const BufferAccess& ba : pass.bufferAccesses)
+            if (ba.buffer.valid() && ba.buffer.id < buffers.size() && (ba.access & kWriteBits))
+                bufPendingWrite[ba.buffer.id] = true;
+
+        for (size_t i = 0; i < texPendingWrite.size(); ++i)
         {
-            if (!pendingWrite[i]) continue;
-            lastWriter[i] = pass.enabled ? pass.name : (pass.name + "（本帧被 setEnabled(false) 跳过）");
-            if (pass.enabled) written[i] = true;
+            if (!texPendingWrite[i]) continue;
+            texLastWriter[i] = pass.enabled ? pass.name : (pass.name + "（本帧被 setEnabled(false) 跳过）");
+            if (pass.enabled) texWritten[i] = true;
+        }
+        for (size_t i = 0; i < bufPendingWrite.size(); ++i)
+        {
+            if (!bufPendingWrite[i]) continue;
+            bufLastWriter[i] = pass.enabled ? pass.name : (pass.name + "（本帧被 setEnabled(false) 跳过）");
+            if (pass.enabled) bufWritten[i] = true;
         }
 
-        if (!pass.enabled) continue;   // 被跳过的 Pass 不产生读
+        if (!pass.enabled) continue;
 
         for (const Access& acc : pass.accesses)
         {
@@ -273,21 +363,33 @@ void RenderGraph::validateWriteCoverage() const
 
             const uint32_t id = acc.texture.id;
             const TextureEntry& te = textures[id];
+            const bool isWrite = (acc.access & kWriteBits) != 0;
+
+            if (pass.isCompute)
+            {
+                texComputeTouched[id] = true;
+                texComputeWritten[id] = texComputeWritten[id] || isWrite;
+            }
+            else
+            {
+                texGraphicsTouched[id] = true;
+                texGraphicsWritten[id] = texGraphicsWritten[id] || isWrite;
+            }
 
             // 只查真正的"读"：写访问本身不要求之前有人写过
-            if (acc.access & kWriteBits) continue;
+            if (isWrite) continue;
 
             // 常驻资源允许整帧只读（IBL 烘焙结果就是这种）
             if (te.desc.persistent) continue;
 
             // 本 Pass 自己会写它（读改写）-> 内容来自本 Pass 或更早，没问题
-            if (pendingWrite[id]) continue;
+            if (texPendingWrite[id]) continue;
 
-            if (!written[id])
+            if (!texWritten[id])
             {
                 std::string detail;
-                if (!lastWriter[id].empty())
-                    detail = "\n  它本来是由 Pass \"" + lastWriter[id] + "\" 写的。";
+                if (!texLastWriter[id].empty())
+                    detail = "\n  它本来是由 Pass \"" + texLastWriter[id] + "\" 写的。";
                 else
                     detail = "\n  没有任何 Pass 声明过要写它。";
 
@@ -301,10 +403,72 @@ void RenderGraph::validateWriteCoverage() const
                     "    ② 调用方按帧如实声明：不需要这张图时就不要 read 它（PresentPass 对 Bloom 的做法）。");
             }
         }
+
+        for (const BufferAccess& acc : pass.bufferAccesses)
+        {
+            if (!acc.buffer.valid() || acc.buffer.id >= buffers.size()) continue;
+
+            const uint32_t id = acc.buffer.id;
+            const BufferEntry& be = buffers[id];
+            const bool isWrite = (acc.access & kWriteBits) != 0;
+
+            if (pass.isCompute)
+            {
+                bufComputeTouched[id] = true;
+                bufComputeWritten[id] = bufComputeWritten[id] || isWrite;
+            }
+            else
+            {
+                bufGraphicsTouched[id] = true;
+                bufGraphicsWritten[id] = bufGraphicsWritten[id] || isWrite;
+            }
+
+            if (isWrite) continue;
+            if (be.desc.persistent) continue;
+            if (bufPendingWrite[id]) continue;
+
+            if (!bufWritten[id])
+            {
+                std::string detail;
+                if (!bufLastWriter[id].empty())
+                    detail = "\n  它本来是由 Pass \"" + bufLastWriter[id] + "\" 写的。";
+                else
+                    detail = "\n  没有任何 Pass 声明过要写它。";
+
+                throw std::runtime_error(
+                    "RenderGraph 语义错误: Pass \"" + pass.name + "\" 读取了瞬时 buffer \""
+                    + be.desc.name + "\"，但这一帧到目前为止没有任何 Pass 写过它。" + detail);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < textures.size(); ++i)
+    {
+        if ((texGraphicsWritten[i] && texComputeTouched[i]) ||
+            (texComputeWritten[i] && texGraphicsTouched[i]))
+        {
+            throw std::runtime_error(
+                "RenderGraph 跨队列错误: 纹理 \"" + textures[i].desc.name +
+                "\" 在 graphics / compute 两条命令流之间同时被写和被访问。"
+                "D-5 的异步队列基础设施还不支持跨队列 ownership + semaphore 自动同步；"
+                "请暂时把相关 pass 放在同一队列，或显式扩展 RenderGraph。");
+        }
+    }
+    for (size_t i = 0; i < buffers.size(); ++i)
+    {
+        if ((bufGraphicsWritten[i] && bufComputeTouched[i]) ||
+            (bufComputeWritten[i] && bufGraphicsTouched[i]))
+        {
+            throw std::runtime_error(
+                "RenderGraph 跨队列错误: buffer \"" + buffers[i].desc.name +
+                "\" 在 graphics / compute 两条命令流之间同时被写和被访问。"
+                "D-5 的异步队列基础设施还不支持跨队列 ownership + semaphore 自动同步；"
+                "请暂时把相关 pass 放在同一队列，或显式扩展 RenderGraph。");
+        }
     }
 }
 
-void RenderGraph::emitBarrierIfNeeded(const Access& acc)
+void RenderGraph::emitBarrierIfNeeded(const Access& acc, VkCommandBuffer target)
 {
     if (!acc.texture.valid()) return;
 
@@ -342,7 +506,38 @@ void RenderGraph::emitBarrierIfNeeded(const Access& acc)
     VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &b;
-    vkCmdPipelineBarrier2(cmd, &dep);
+    vkCmdPipelineBarrier2(target, &dep);
+}
+
+void RenderGraph::emitBufferBarrierIfNeeded(const BufferAccess& acc, VkCommandBuffer target)
+{
+    if (!acc.buffer.valid()) return;
+
+    BufferEntry& e = buffers[acc.buffer.id];
+    const bool isRead = (acc.access & kWriteBits) == 0;
+    const bool sameState = (e.stage == acc.stage && e.access == acc.access);
+    if (sameState && isRead)
+        return;
+
+    // 新建 buffer 的第一次写不需要 src 依赖。
+    if (!isRead && e.stage == VK_PIPELINE_STAGE_2_NONE && e.access == VK_ACCESS_2_NONE)
+        return;
+
+    VkBufferMemoryBarrier2 b{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+    b.srcStageMask = e.stage;
+    b.srcAccessMask = e.access;
+    b.dstStageMask = acc.stage;
+    b.dstAccessMask = acc.access;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.buffer = e.buffer;
+    b.offset = 0;
+    b.size = VK_WHOLE_SIZE;
+
+    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    dep.bufferMemoryBarrierCount = 1;
+    dep.pBufferMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(target, &dep);
 }
 
 RenderGraph::Pass& RenderGraph::addGraphicsPass(const std::string& name)
@@ -395,6 +590,55 @@ RenderGraph::TextureHandle RenderGraph::importTexture(const TextureDesc& desc, V
 
     textures.push_back(std::move(e));
     return TextureHandle{ static_cast<uint32_t>(textures.size() - 1) };
+}
+
+RenderGraph::BufferHandle RenderGraph::createBuffer(const BufferDesc& desc)
+{
+    if (desc.size == 0)
+        throw std::runtime_error("RenderGraph: buffer \"" + desc.name + "\" 的大小不能为 0");
+
+    BufferEntry e;
+    e.desc = desc;
+    e.owned = true;
+    createOwnedBuffer(e);
+
+    buffers.push_back(std::move(e));
+    return BufferHandle{ static_cast<uint32_t>(buffers.size() - 1) };
+}
+
+RenderGraph::BufferHandle RenderGraph::importBuffer(const BufferDesc& desc, VkBuffer buffer)
+{
+    if (buffer == VK_NULL_HANDLE)
+        throw std::runtime_error("RenderGraph: importBuffer 收到了 VK_NULL_HANDLE");
+
+    BufferEntry e;
+    e.desc = desc;
+    e.buffer = buffer;
+    e.owned = false;
+    buffers.push_back(std::move(e));
+    return BufferHandle{ static_cast<uint32_t>(buffers.size() - 1) };
+}
+
+void RenderGraph::createOwnedBuffer(BufferEntry& e)
+{
+    VkBufferCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = e.desc.size;
+    info.usage = e.desc.usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo alloc{};
+    alloc.usage = e.desc.hostVisible ? VMA_MEMORY_USAGE_AUTO : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (e.desc.hostVisible)
+        alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VmaAllocationInfo allocInfo{};
+    if (vmaCreateBuffer(device.getVmaAllocator(), &info, &alloc,
+        &e.buffer, &e.allocation, &allocInfo) != VK_SUCCESS)
+        throw std::runtime_error("RenderGraph: buffer 创建失败: " + e.desc.name);
+
+    if (e.desc.hostVisible)
+        e.mapped = allocInfo.pMappedData;
 }
 
 void RenderGraph::createOwnedTexture(TextureEntry& e)
@@ -461,6 +705,33 @@ const RenderGraph::TextureDesc& RenderGraph::getDesc(TextureHandle h) const
     return textures[h.id].desc;
 }
 
+VkBuffer RenderGraph::getBuffer(BufferHandle h) const
+{
+    if (!h.valid() || h.id >= buffers.size()) return VK_NULL_HANDLE;
+    return buffers[h.id].buffer;
+}
+
+const RenderGraph::BufferDesc& RenderGraph::getBufferDesc(BufferHandle h) const
+{
+    if (!h.valid() || h.id >= buffers.size())
+        throw std::runtime_error("RenderGraph: 非法的 buffer 句柄");
+    return buffers[h.id].desc;
+}
+
+void* RenderGraph::getBufferMapped(BufferHandle h) const
+{
+    if (!h.valid() || h.id >= buffers.size()) return nullptr;
+    return buffers[h.id].mapped;
+}
+
+void RenderGraph::invalidateBuffer(BufferHandle h) const
+{
+    if (!h.valid() || h.id >= buffers.size()) return;
+    const BufferEntry& e = buffers[h.id];
+    if (e.owned && e.allocation != VK_NULL_HANDLE && e.mapped != nullptr)
+        vmaInvalidateAllocation(device.getVmaAllocator(), e.allocation, 0, VK_WHOLE_SIZE);
+}
+
 void RenderGraph::presentTransition(TextureHandle handle)
 {
     if (!handle.valid()) return;
@@ -505,6 +776,20 @@ RenderGraph::Pass& RenderGraph::Pass::writeStorage(TextureHandle t, VkPipelineSt
 {
     if (t.valid())
         accesses.push_back(Access{ t, VK_IMAGE_LAYOUT_GENERAL, stage, access });
+    return *this;
+}
+
+RenderGraph::Pass& RenderGraph::Pass::readBuffer(BufferHandle b, VkPipelineStageFlags2 stage, VkAccessFlags2 access)
+{
+    if (b.valid())
+        bufferAccesses.push_back(BufferAccess{ b, stage, access });
+    return *this;
+}
+
+RenderGraph::Pass& RenderGraph::Pass::writeBuffer(BufferHandle b, VkPipelineStageFlags2 stage, VkAccessFlags2 access)
+{
+    if (b.valid())
+        bufferAccesses.push_back(BufferAccess{ b, stage, access });
     return *this;
 }
 

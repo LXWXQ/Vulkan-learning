@@ -3,6 +3,8 @@
 #include "RHI/RenderGraph.h"
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <array>
+#include "Core/FrameInFlight.h"
 
 // D-2：光照通道的输出格式（线性 HDR 中间目标）。
 // 用 16F 而不是 11-11-10 或 R8：Bloom 要在 tonal 映射之前看到 >1 的高光，
@@ -18,24 +20,23 @@ inline constexpr VkFormat kHdrSceneFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 // 所以这个结构同时也是同步关系的唯一事实来源。
 struct RenderResources
 {
-    // ---- G-Buffer（GeometryPass 写，SSAOPass / LightingPass 读）----
-    RenderGraph::TextureHandle gbPosition;
-    RenderGraph::TextureHandle gbNormal;
-    RenderGraph::TextureHandle gbAlbedo;
-    RenderGraph::TextureHandle gbPbr;
-    RenderGraph::TextureHandle gbDepth;
+    // ---- D-4：以下瞬时资源全部按 frame-in-flight 槽位各自一份 ----
+    // 两帧同时在飞时，第 N+1 帧录制/提交不能读写第 N 帧仍在使用的 G-Buffer、
+    // SSAO、HDR 或 Bloom 中间图。共享它们会造成跨帧数据竞争，验证层不一定能报。
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> gbPosition;
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> gbNormal;
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> gbAlbedo;
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> gbPbr;
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> gbDepth;
 
-    // ---- 中间产物 ----
-    RenderGraph::TextureHandle ssao;       // SSAOPass 写，LightingPass 读
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> ssao;
 
-    // D-2：光照的终点不再是交换链，而是这张线性 HDR 图。
-    // 它是后效链的输入 —— Bloom 在它上面提亮部，PresentPass 把它变成显示值。
-    RenderGraph::TextureHandle hdrScene;   // LightingPass 写，BloomPass / PresentPass 读
+    // 光照终点：每帧一份线性 HDR 中间目标。
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> hdrScene;
 
-    // ---- Bloom 金字塔（BloomPass 内部创建）----
-    // 单独暴露出来是为了让 ImGui 能可视化某一级，也方便以后接自动曝光。
-    std::vector<RenderGraph::TextureHandle> bloomLevels;
-    RenderGraph::TextureHandle bloomResult;   // 供 PresentPass 采样的最终辉光图
+    // 每帧一棵 Bloom 金字塔；每棵 4 级。
+    std::array<std::vector<RenderGraph::TextureHandle>, kFramesInFlight> bloomLevels;
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> bloomResult;
 
     // PresentPass 用的采样器不属于渲染图（渲染图只管图像），由使用方持有
     VkSampler hdrSampler = VK_NULL_HANDLE;

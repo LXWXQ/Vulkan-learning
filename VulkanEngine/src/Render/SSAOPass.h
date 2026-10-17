@@ -8,6 +8,8 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
+#include <array>
+#include "Core/FrameInFlight.h"
 
 struct SSAOUbo
 {
@@ -36,9 +38,9 @@ public:
     void addToGraph(RenderGraph& graph, FrameInfo& frameInfo) override;
     std::string getName() const override { return "SSAO"; }
 
-    // 供 Application 写进全局描述符集（binding 6）
+    // 供 Application 写进每帧的全局描述符集（binding 6）。
     VkSampler   getOutputSampler() const { return outputSampler; }
-    VkImageView getOutputImageView() const;
+    VkImageView getOutputImageView(uint32_t frameInFlightIndex) const;
 
 private:
     void generateSampleKernel();
@@ -63,14 +65,14 @@ private:
         VkSampler     sampler = VK_NULL_HANDLE;
     } noiseTexture;
 
-    VkBuffer      uboBuffer = VK_NULL_HANDLE;
-    VmaAllocation uboAllocation = VK_NULL_HANDLE;
-    void*         uboMapped = nullptr;
+    std::array<VkBuffer, kFramesInFlight>      uboBuffers{};
+    std::array<VmaAllocation, kFramesInFlight> uboAllocations{};
+    std::array<void*, kFramesInFlight>         uboMapped{};
 
     VkSampler     outputSampler = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout localSetLayout = VK_NULL_HANDLE;
-    VkDescriptorSet       localSet = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> localSets{};
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unique_ptr<Pipeline> ssaoPipeline;

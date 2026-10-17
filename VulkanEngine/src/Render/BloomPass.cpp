@@ -42,41 +42,48 @@ void BloomPass::init()
     createDescriptorLayout();
     createSampler();
 
-    // ---- 金字塔各级：每级都是上一级的一半 ----
-    // 各级同时要能当颜色附件（被写）和采样源（被读），所以 usage 两个都要。
-    resources.bloomLevels.clear();
-    resources.bloomLevels.reserve(kLevelCount);
-
-    VkExtent2D extent = renderGraph.getExtent(resources.hdrScene);
-    for (uint32_t i = 0; i < kLevelCount; ++i)
-    {
-        extent = halfExtent(extent);
-
-        RenderGraph::TextureDesc desc;
-        desc.name = "Bloom.Level" + std::to_string(i);
-        desc.format = renderGraph.getFormat(resources.hdrScene);
-        desc.extent = extent;
-        desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-
-        resources.bloomLevels.push_back(renderGraph.createTexture(desc));
-    }
-    // PresentPass 采样的就是最细的那一级
-    resources.bloomResult = resources.bloomLevels.front();
-
-    // 描述符集数量：1 个亮部提取 + (kLevelCount - 1) 次降采样 + (kLevelCount - 1) 次上采样。
-    // 之所以能复用同一套 layout，是因为 Bloom 的每个 Pass 都只采样一张图。
+    // 描述符集数量：每帧 1 个亮部提取 + 2*(kLevelCount-1) 个降/上采样。
+    // 每个 frame slot 各有一组，描述符指向该帧自己的 HDR 与 Bloom 金字塔。
     const uint32_t setCount = 1 + 2 * (kLevelCount - 1);
-    sets.resize(setCount);
-    for (uint32_t i = 0; i < setCount; ++i)
-        sets[i] = descriptorManager->allocateSet(setLayout);
+    sets.resize(kFramesInFlight * setCount);
 
-    // 纹理由渲染图持有，VkImageView 只在 start/end 时重建 —— 启动时写一次就够，
-    // 不需要每帧 vkUpdateDescriptorSets。
-    updateDescriptor(0, renderGraph.getView(resources.hdrScene));
-    for (uint32_t i = 0; i < kLevelCount - 1; ++i)
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
     {
-        updateDescriptor(1 + i, renderGraph.getView(resources.bloomLevels[i]));
-        updateDescriptor(1 + (kLevelCount - 1) + i, renderGraph.getView(resources.bloomLevels[i + 1]));
+        // ---- 金字塔各级：每级都是上一级的一半 ----
+        // 各级同时要能当颜色附件（被写）和采样源（被读），所以 usage 两个都要。
+        std::vector<RenderGraph::TextureHandle>& levels = resources.bloomLevels[frame];
+        levels.clear();
+        levels.reserve(kLevelCount);
+
+        VkExtent2D extent = renderGraph.getExtent(resources.hdrScene[frame]);
+        for (uint32_t i = 0; i < kLevelCount; ++i)
+        {
+            extent = halfExtent(extent);
+
+            RenderGraph::TextureDesc desc;
+            desc.name = "Bloom.Frame" + std::to_string(frame) + ".Level" + std::to_string(i);
+            desc.format = renderGraph.getFormat(resources.hdrScene[frame]);
+            desc.extent = extent;
+            desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
+            levels.push_back(renderGraph.createTexture(desc));
+        }
+
+        // PresentPass 采样的就是最细的那一级
+        resources.bloomResult[frame] = levels.front();
+
+        const uint32_t base = frame * setCount;
+        for (uint32_t i = 0; i < setCount; ++i)
+            sets[base + i] = descriptorManager->allocateSet(setLayout);
+
+        // 纹理由渲染图持有，VkImageView 只在 start/end 时重建 —— 启动时写一次就够，
+        // 不需要每帧 vkUpdateDescriptorSets。
+        updateDescriptor(base, renderGraph.getView(resources.hdrScene[frame]));
+        for (uint32_t i = 0; i < kLevelCount - 1; ++i)
+        {
+            updateDescriptor(base + 1 + i, renderGraph.getView(levels[i]));
+            updateDescriptor(base + 1 + (kLevelCount - 1) + i, renderGraph.getView(levels[i + 1]));
+        }
     }
 
     createPipelines();
@@ -130,7 +137,7 @@ void BloomPass::updateDescriptor(uint32_t index, VkImageView view)
 
 void BloomPass::createPipelines()
 {
-    const VkFormat format = renderGraph.getFormat(resources.hdrScene);
+    const VkFormat format = renderGraph.getFormat(resources.hdrScene[0]);
     const std::string vert = SENTINEL_SHADER_DIR "fullscreen.vert.spv";
 
     auto makeLayout = [&](uint32_t pushSize)
@@ -206,6 +213,10 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     const EngineSettings& s = frameInfo.settings;
     const uint32_t downs = kLevelCount - 1;
+    const uint32_t frame = frameInfo.frameInFlightIndex;
+    const auto& levels = resources.bloomLevels[frame];
+    const uint32_t setCount = 1 + 2 * (kLevelCount - 1);
+    const uint32_t setBase = frame * setCount;
 
     // -----------------------------------------------------------------------
     // 【为什么"关掉 Bloom"不是跳过这几个 Pass】
@@ -240,16 +251,17 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     // ---- 1) 亮部提取：HDR -> 最细一级 ----
     {
         auto& pass = graph.addGraphicsPass("Bloom.Bright");
-        pass.read(resources.hdrScene);
-        pass.writeColor(resources.bloomLevels[0], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
+        pass.read(resources.hdrScene[frame]);
+        pass.writeColor(levels[0], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
         // 关闭时把强度置零 => 输出全黑 => 后续上采样累加的还是黑
         BrightPush push{ s.bloomThreshold, s.bloomKnee, active ? 1.0f : 0.0f };
-        pass.execute([this, push](VkCommandBuffer cmd)
+        const uint32_t setIndex = setBase;
+        pass.execute([this, push, setIndex](VkCommandBuffer cmd)
         {
             brightPipeline->bind(cmd);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, brightLayout,
-                0, 1, &sets[0], 0, nullptr);
+                0, 1, &sets[setIndex], 0, nullptr);
             vkCmdPushConstants(cmd, brightLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         });
@@ -260,16 +272,16 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     for (uint32_t i = 0; i < downs; ++i)
     {
         auto& pass = graph.addGraphicsPass("Bloom.Down" + std::to_string(i));
-        pass.read(resources.bloomLevels[i]);
-        pass.writeColor(resources.bloomLevels[i + 1], VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+        pass.read(levels[i]);
+        pass.writeColor(levels[i + 1], VK_ATTACHMENT_LOAD_OP_DONT_CARE);
         // 关闭时也照跑（见本函数开头对"为什么不用 setEnabled"的说明）
 
-        const VkExtent2D srcExtent = graph.getExtent(resources.bloomLevels[i]);
+        const VkExtent2D srcExtent = graph.getExtent(levels[i]);
         DownPush push{};
         push.srcTexelSize = glm::vec2(1.0f / float(srcExtent.width), 1.0f / float(srcExtent.height));
         push.karisAverage = (i == 0) ? 1 : 0;
 
-        const uint32_t setIndex = 1 + i;
+        const uint32_t setIndex = setBase + 1 + i;
         pass.execute([this, push, setIndex](VkCommandBuffer cmd)
         {
             downPipeline->bind(cmd);
@@ -285,16 +297,16 @@ void BloomPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     for (uint32_t i = downs; i-- > 0; )
     {
         auto& pass = graph.addGraphicsPass("Bloom.Up" + std::to_string(i));
-        pass.read(resources.bloomLevels[i + 1]);
-        pass.writeColor(resources.bloomLevels[i], VK_ATTACHMENT_LOAD_OP_LOAD);
+        pass.read(levels[i + 1]);
+        pass.writeColor(levels[i], VK_ATTACHMENT_LOAD_OP_LOAD);
         // 关闭时也照跑：亮部提取已经输出全黑，这里累加的还是黑
 
-        const VkExtent2D srcExtent = graph.getExtent(resources.bloomLevels[i + 1]);
+        const VkExtent2D srcExtent = graph.getExtent(levels[i + 1]);
         UpPush push{};
         push.srcTexelSize = glm::vec2(1.0f / float(srcExtent.width), 1.0f / float(srcExtent.height));
         push.radius = 1.0f;
 
-        const uint32_t setIndex = 1 + downs + i;
+        const uint32_t setIndex = setBase + 1 + downs + i;
         pass.execute([this, push, setIndex](VkCommandBuffer cmd)
         {
             upPipeline->bind(cmd);

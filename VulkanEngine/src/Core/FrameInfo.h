@@ -6,6 +6,7 @@
 #include <cstddef>   // offsetof
 #include <string>    // EngineSettings::windowTitle
 #include <functional>  // FrameInfo 的配置回调
+#include "Core/FrameInFlight.h"
 
 #define MAX_POINT_LIGHTS 100
 #define WIDTH 1920
@@ -136,9 +137,19 @@ struct RenderTelemetry
 
 struct FrameInfo
 {
-	uint32_t frameIndex;
-	float frameTime;
-	VkCommandBuffer commandBuffer;
+// 每个在飞帧槽位对应的索引（0..kFramesInFlight-1）。
+// 用来选择该帧专属的 UBO、全局描述符集和瞬时渲染目标。
+uint32_t frameInFlightIndex;
+
+// 本次 acquire 到的交换链图像索引。它与 frameInFlightIndex 语义完全不同：
+// 交换链图像可能每帧变化，而 frame slot 是固定循环复用的。
+uint32_t swapchainImageIndex;
+
+// 从启动开始的逻辑帧号，用于日志 / 调试与 timeline semaphore 对照。
+uint64_t frameNumber;
+
+float frameTime;
+VkCommandBuffer commandBuffer;
 
 	EngineSettings& settings;
 	RenderTelemetry& telemetry;

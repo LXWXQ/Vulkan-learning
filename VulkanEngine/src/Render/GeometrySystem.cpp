@@ -83,7 +83,7 @@ void GeometrySystem::render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
     // 103 个子网格，于是 104 次 draw 伴随多达 104 次描述符集绑定。
     // 现在材质纹理在一个数组里，下标走 push constant，绑定与绘制彻底解耦。
     // -----------------------------------------------------------------------
-    VkDescriptorSet sets[] = { descMgr.getGlobalSet(), descMgr.getMaterialSet() };
+    VkDescriptorSet sets[] = { descMgr.getGlobalSet(frameInfo.frameInFlightIndex), descMgr.getMaterialSet() };
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
         pipelineLayout, 0, 2, sets, 0, nullptr);
     frameInfo.telemetry.descriptorBinds += 1;

@@ -8,7 +8,9 @@
 
 ## 0. 一句话状态
 
-**仓库干净、18 个提交、构建零警告、验证层 0 字节。下一个任务是 D-4（多帧并行 + timeline semaphore）。**
+**家庭工作区：D-4 / D-5 已完成（本地未提交）。2 帧在飞 + graphics/compute 双 timeline；compute probe 已验证 GPU 写 / CPU 读回；四种自检组合各跑 120 帧，stderr 全部 0 字节。**
+
+> 当前 HEAD 仍是原仓库的 `0010689 (refactor)`；本机适配与 D-4 / D-5 改动都在工作区，尚未 commit。
 
 ```
 9cee23b  技术债：登记 D-3 自己引入的两条
@@ -120,56 +122,69 @@ $py = 'C:\Users\Admin\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\
 
 ---
 
-## 4. 下一步：D-4（多帧并行 + timeline semaphore）
+## 4. D-4：多帧并行 + timeline semaphore（已完成，本地未提交）
 
-### 4.1 现状（问题在哪）
+### 4.1 实现结果
 
-`Renderer` 是**单缓冲**：1 个命令缓冲、1 个 fence、2 个 semaphore。
-`Renderer::beginFrame` 里 `vkWaitForFences` 等上一帧完成才开始录制 → **CPU 和 GPU 完全不重叠**。
+- `kFramesInFlight = 2`，定义在 `src/Core/FrameInFlight.h`。
+- `Renderer` 改成：
+  - 每帧槽位一条独立命令缓冲；
+  - 一个 timeline semaphore 追踪 frame slot 的 GPU 完成值；
+  - `imageAvailableSemaphores[kFramesInFlight]` + `renderFinishedSemaphores[swapchainImageCount]`；
+  - 不再使用每帧 `vkWaitForFences` 串行等待。
+- `FrameInfo` 拆成三个明确字段：
+  - `frameInFlightIndex`：CPU/GPU 资源槽位；
+  - `swapchainImageIndex`：本次 acquire 的交换链图像；
+  - `frameNumber`：从启动开始的逻辑帧号。
+- 所有会被 GPU 跨帧读取的瞬时资源都按 frame slot 各一份：
+  - 全局 UBO；
+  - G-Buffer（5 张附件 × 2）；
+  - SSAO UBO + SSAO 输出；
+  - HDR scene；
+  - Bloom 金字塔（4 级 × 2）；
+  - 对应的全局 / SSAO / Bloom / Present 描述符集。
+- `DescriptorManager::releaseMaterialSet()` 增加 `vkDeviceWaitIdle` 保险，修掉技术债 22。
+- `timelineSemaphore` 设备特性在 `Device::createLogicalDevice()` 中显式查询并启用。
 
-连带的耦合（这一步必须一起改，否则会出数据竞争）：
+### 4.2 验证结果
 
-| 东西 | 现状 | 为什么必须改 |
-|---|---|---|
-| 全局 UBO | **只有一份**，每帧 `memcpy` 覆盖 | 多帧在飞时，帧 N+1 会改写帧 N 正在读的数据 |
-| 命令缓冲 | 1 个 | 每帧在飞需要独立的命令缓冲 |
-| fence / semaphore | 1 组 | 同上 |
-| `FrameInfo::frameIndex` | 装的是**交换链图像索引**，不是帧计数器 | 名字有误导性；D-4 引入 `frameInFlightIndex` 时两者语义必须分开 |
-| 描述符集 | init 时写一次 | bindless 数组项若在运行期被改写会和读取重叠（见 4.3） |
+- 全新 configure + Debug build：通过，无编译警告。
+- `--selftest 120`：
+  - 默认；
+  - `--no-bloom`；
+  - `--no-ssao`；
+  - `--no-bloom --no-ssao`。
+- 四种组合 **stderr 全部 0 字节**。
+- 正常窗口运行实测：`[Perf] 566 FPS | draw calls 104 | desc binds 1 | triangles 270459 | vertices 811377`。
+- 正常关窗退出路径已覆盖，配置正常保存。
 
-### 4.2 我建议的做法（不一定是最优，但理由要讲清）
+### 4.3 D-5：Compute + 异步计算队列（已完成，本地未提交）
 
-1. `Renderer` 改成 `kFramesInFlight = 2`（或 3）：per-frame 命令缓冲 + fence + timeline semaphore。
-2. **UBO 改成 per-frame-in-flight 数组**（`GlobalUbo ubos[kFramesInFlight]`，或一个大 buffer + 偏移）。
-   描述符集也要 per-frame，或者用动态 UBO 偏移（`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`）。
-3. `FrameInfo` 明确区分 `frameInFlightIndex` 与 `swapchainImageIndex`，把现在那个有歧义的
-   `frameIndex` 拆成两个名字。
-4. **顺带修掉 D-3 留下的那条债**（见 4.3）——timeline semaphore 正好给了"等某一帧完成"的手段。
+- `Device` 增加 compute queue family 选择：优先独立 compute family，没有则回退 graphics family；
+  当前机器是 `graphics=0 present=2 compute=2`，属于独立异步计算队列。
+- 新增 `ComputePipeline`，只包含 compute stage，不经过动态渲染/顶点输入。
+- `Renderer` 增加每 frame slot 一条 compute command buffer、独立 compute command pool、
+  graphics/compute 双 timeline semaphore；复用 slot 前同时等待两条 timeline。
+- `RenderGraph` 新增 storage buffer 基础设施：`BufferHandle` / `createBuffer` / `importBuffer` /
+  `readBuffer` / `writeBuffer` / `VkBufferMemoryBarrier2`，并把 buffer 纳入语义校验。
+- compute pass 现在真正记录到 compute command buffer，`isCompute` 不再是死标志。
+- 新增 `ComputeProbePass` + `shaders/compute_probe.comp`：GPU 生成 1024 个 uint，
+  第二 dispatch 做 checksum 到 host-visible buffer，下一轮 CPU 读回验证。
+- 反面用例 `SENTINEL_SIMULATE_COMPUTE_SKIP=1` 跳过写入 pass，buffer 语义校验会明确报错。
+- 当前限制：compute / graphics 之间的 producer-consumer 资源依赖尚未实现跨队列
+  ownership + semaphore 调度；RenderGraph 检测到这种访问会抛异常，不会静默竞争。
 
-### 4.3 ⚠️ D-4 会主动制造的风险（我专门提醒的）
+验证：
+- 四种 selftest 组合各 120 帧，stderr 0 字节；每轮都出现
+  `[D5] async compute probe verified: frame ... checksum ...`。
+- `SENTINEL_SIMULATE_COMPUTE_SKIP=1` 能被 buffer 语义校验拦下。
+- 正常窗口运行实测 526 FPS（compute probe 固定开销约 36 FPS）。
 
-D-3 让材质描述符变成 bindless 数组，而 `DescriptorManager::releaseMaterialSet` 的注释里写着：
+### 4.4 下一步
 
-> bindless 之后"回收槽位再复用"意味着**改写 GPU 可能正在读的数组项**。
-> 当前只在初始化阶段分配（设备此时空闲）所以安全。
+D-6：作业系统（Job System）。
 
-**多帧并行 + bindless 叠加之后，这条从"理论问题"变成"随时会踩"** —— 描述符更新和
-2~3 帧在飞的读取会真正重叠。
-
-所以 D-4 应该**顺带把这条债修掉**（加帧 fence，或上 `VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT` + 双缓冲），
-而不是留到以后。已登记在 `AI_Readme.md` 第 12 节第 22 条。
-
-### 4.4 D-4 之后的路线（来自 `AI_Readme.md`）
-
-```
-D-5  Compute + 异步计算队列        （⚠️ 必须同时把 W2 的语义校验扩展到 buffer —— 现在只管"图"）
-D-6  作业系统（线程池）
-D-7  EnTT ECS + Transform 层级 + 空间索引
-```
-
----
-
-## 5. 已登记的技术债（22 条，别重复发现）
+## 5. 已登记的技术债（23 条，别重复发现）
 
 完整清单在 `AI_Readme.md` 第 12 节 + `ARCHITECTURE.md` 第 11 节。**这一轮自己引入/暴露的**是 17~22：
 
@@ -177,10 +192,11 @@ D-7  EnTT ECS + Transform 层级 + 空间索引
 |---|---|---|
 | 17 | **"关闭 Bloom"仍有 7 个全屏 Pass 的固定开销** —— W2 为了让语义校验的不变量成立，把 Bloom 关闭从"跳过 Pass"改成"强度置零"。视觉等价，但 Pass 照跑，所以关掉 Bloom 并不省 GPU | Bloom 变重时改两套描述符绑定 |
 | 18 | `EngineConfig` 没有版本迁移、没有多套预设（`version` 字段写了但没人读） | 有需求时 |
-| 19 | **W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip/层** | **D-5 必须一并扩展** |
+| 19 | ~~W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip/层~~ → **D-5 已扩展到 storage buffer**；单个 mip/层仍待有需要时补 | ✅ 已完成主体 |
 | 20 | 验证脚本的两个前提（正常关窗 / 窗口在前台）没有自动化保护，脚本在 `%TEMP%` 下不在版本库 | 建议尽早把脚本迁进仓库 |
 | 21 | bindless 的 `normalMaps` 数组绑了但没被采样（切线空间法线贴图仍有意关闭），256 材质白占 256 个描述符 | 启用切线法线贴图时 |
-| 22 | **运行期复用材质槽位会改写 GPU 可能正在读的数组项，且无防护**（只有注释） | **D-4 顺带修** |
+| 22 | ~~运行期复用材质槽位会改写 GPU 可能正在读的数组项~~ → **D-4 已修**：`releaseMaterialSet()` 在归还前执行 `vkDeviceWaitIdle`。热路径要优化时再换 timeline 延迟回收。 | ✅ 已完成 |
+| 23 | **D-5 的异步 compute 尚不支持跨队列 producer/consumer**：compute 写、graphics 读（或反向）目前会被 RenderGraph 显式拒绝；GPU culling / 体素 indirect buffer 接入前必须补 ownership + semaphore 调度 | 接入 GPU 剔除/体素生成前 |
 
 > **17 是我明确不满意的那个交易**，不是"顺手记一下"。第 4 节开头提到的"D-4 顺带修 22"也是我主动提出的。
 

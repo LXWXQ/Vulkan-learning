@@ -20,7 +20,11 @@ SSAOPass::~SSAOPass()
     if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device.getDevice(), pipelineLayout, nullptr);
     if (localSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device.getDevice(), localSetLayout, nullptr);
 
-    if (uboBuffer != VK_NULL_HANDLE) vmaDestroyBuffer(device.getVmaAllocator(), uboBuffer, uboAllocation);
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        if (uboBuffers[frame] != VK_NULL_HANDLE)
+            vmaDestroyBuffer(device.getVmaAllocator(), uboBuffers[frame], uboAllocations[frame]);
+    }
 
     if (noiseTexture.sampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), noiseTexture.sampler, nullptr);
     if (noiseTexture.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), noiseTexture.view, nullptr);
@@ -29,20 +33,23 @@ SSAOPass::~SSAOPass()
     if (outputSampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), outputSampler, nullptr);
 }
 
-VkImageView SSAOPass::getOutputImageView() const
+VkImageView SSAOPass::getOutputImageView(uint32_t frameInFlightIndex) const
 {
-    return renderGraph.getView(resources.ssao);
+    return renderGraph.getView(resources.ssao[frameInFlightIndex]);
 }
 
 void SSAOPass::init()
 {
-    // 输出目标交给渲染图创建 —— 它会被光照通道采样，渲染图据此自动插屏障
-    RenderGraph::TextureDesc desc;
-    desc.name = "SSAO";
-    desc.format = VK_FORMAT_R8_UNORM;
-    desc.extent = { WIDTH, HEIGHT };
-    desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    resources.ssao = renderGraph.createTexture(desc);
+    // 输出目标交给渲染图创建；D-4 起每个 frame slot 一张，避免跨帧读写冲突。
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        RenderGraph::TextureDesc desc;
+        desc.name = "SSAO.Frame" + std::to_string(frame);
+        desc.format = VK_FORMAT_R8_UNORM;
+        desc.extent = renderGraph.getExtent(resources.gbPosition[frame]);
+        desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        resources.ssao[frame] = renderGraph.createTexture(desc);
+    }
 
     // 采样器要自己建：渲染图只管图像，不管采样器
     VkSamplerCreateInfo si{};
@@ -193,21 +200,32 @@ void SSAOPass::createNoiseTexture()
 
 void SSAOPass::createUniformBuffer()
 {
-    VkDeviceSize bufferSize = sizeof(SSAOUbo);
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = bufferSize;
-    bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    allocInfo.flags |= sentinel_vmaNameFlag();
-    allocInfo.pUserData = const_cast<char*>("SSAOUbo");
-    vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo, &uboBuffer, &uboAllocation, nullptr);
+    // 每个 frame slot 一份 UBO。两份 buffer 不能共用一个映射地址，
+    // 否则第 N+1 帧的 memcpy 会覆盖 GPU 仍在读的第 N 帧参数。
+    static const char* const names[kFramesInFlight] = { "SSAOUbo.Frame0", "SSAOUbo.Frame1" };
 
-    VmaAllocationInfo info;
-    vmaGetAllocationInfo(device.getVmaAllocator(), uboAllocation, &info);
-    uboMapped = info.pMappedData;
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        VkDeviceSize bufferSize = sizeof(SSAOUbo);
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = bufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        allocInfo.flags |= sentinel_vmaNameFlag();
+        allocInfo.pUserData = const_cast<char*>(names[frame]);
+
+        if (vmaCreateBuffer(device.getVmaAllocator(), &bufferInfo, &allocInfo,
+            &uboBuffers[frame], &uboAllocations[frame], nullptr) != VK_SUCCESS)
+            throw std::runtime_error("SSAOPass: per-frame UBO 创建失败");
+
+        VmaAllocationInfo info;
+        vmaGetAllocationInfo(device.getVmaAllocator(), uboAllocations[frame], &info);
+        uboMapped[frame] = info.pMappedData;
+    }
 }
 
 void SSAOPass::createLocalDescriptors()
@@ -224,25 +242,29 @@ void SSAOPass::createLocalDescriptors()
 
     localSetLayout = descriptorManager->createSetLayout(
         std::vector<VkDescriptorSetLayoutBinding>(bindings.begin(), bindings.end()));
-    localSet = descriptorManager->allocateSet(localSetLayout);
 
-    VkDescriptorBufferInfo bufferInfo{ uboBuffer, 0, sizeof(SSAOUbo) };
-    VkDescriptorImageInfo noiseInfo{ noiseTexture.sampler, noiseTexture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        localSets[frame] = descriptorManager->allocateSet(localSetLayout);
 
-    std::array<VkWriteDescriptorSet, 2> writes{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = localSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[0].descriptorCount = 1;
-    writes[0].pBufferInfo = &bufferInfo;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = localSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].descriptorCount = 1;
-    writes[1].pImageInfo = &noiseInfo;
-    vkUpdateDescriptorSets(device.getDevice(), 2, writes.data(), 0, nullptr);
+        VkDescriptorBufferInfo bufferInfo{ uboBuffers[frame], 0, sizeof(SSAOUbo) };
+        VkDescriptorImageInfo noiseInfo{ noiseTexture.sampler, noiseTexture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = localSets[frame];
+        writes[0].dstBinding = 0;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].descriptorCount = 1;
+        writes[0].pBufferInfo = &bufferInfo;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = localSets[frame];
+        writes[1].dstBinding = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].descriptorCount = 1;
+        writes[1].pImageInfo = &noiseInfo;
+        vkUpdateDescriptorSets(device.getDevice(), 2, writes.data(), 0, nullptr);
+    }
 }
 
 void SSAOPass::createPipeline()
@@ -270,6 +292,8 @@ void SSAOPass::createPipeline()
 void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
     // 每帧上传 SSAO 参数
+    const uint32_t frame = frameInfo.frameInFlightIndex;
+
     SSAOUbo ubo{};
     ubo.projection = frameInfo.projectionMatrix;
     ubo.view = frameInfo.viewMatrix;
@@ -278,16 +302,16 @@ void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     ubo.kernelSize = frameInfo.settings.ssaoKernelSize;
     ubo.enabled = frameInfo.settings.ssaoEnabled ? 1.0f : 0.0f;
     memcpy(ubo.samples, ssaoKernel.data(), 64 * sizeof(glm::vec4));
-    memcpy(uboMapped, &ubo, sizeof(ubo));
-    vmaFlushAllocation(device.getVmaAllocator(), uboAllocation, 0, sizeof(ubo));
+    memcpy(uboMapped[frame], &ubo, sizeof(ubo));
+    vmaFlushAllocation(device.getVmaAllocator(), uboAllocations[frame], 0, sizeof(ubo));
 
     VkClearValue clear{};
     clear.color = { { 1.0f, 1.0f, 1.0f, 1.0f } };
 
     auto& pass = graph.addGraphicsPass("SSAO");
-    pass.read(resources.gbPosition);
-    pass.read(resources.gbNormal);
-    pass.writeColor(resources.ssao, VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
+    pass.read(resources.gbPosition[frame]);
+    pass.read(resources.gbNormal[frame]);
+    pass.writeColor(resources.ssao[frame], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
     // 注意：这里**故意不调用 pass.setEnabled(ssaoEnabled)**。
     //
@@ -310,11 +334,11 @@ void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     if (simulateSkip)
         pass.setEnabled(false);
 
-    pass.execute([this, &frameInfo](VkCommandBuffer cmd)
+    pass.execute([this, &frameInfo, frame](VkCommandBuffer cmd)
     {
         ssaoPipeline->bind(cmd);
-        VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet();
-        VkDescriptorSet sets[] = { globalSet, localSet };
+        VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet(frame);
+        VkDescriptorSet sets[] = { globalSet, localSets[frame] };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 2, sets, 0, nullptr);
         vkCmdDraw(cmd, 3, 1, 0, 0);
     });

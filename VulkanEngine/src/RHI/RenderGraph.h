@@ -38,6 +38,12 @@ public:
         bool valid() const { return id != UINT32_MAX; }
     };
 
+    struct BufferHandle
+    {
+        uint32_t id = UINT32_MAX;
+        bool valid() const { return id != UINT32_MAX; }
+    };
+
     struct TextureDesc
     {
         std::string name;
@@ -66,6 +72,26 @@ public:
     {
         TextureHandle texture;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkPipelineStageFlags2 stage = 0;
+        VkAccessFlags2 access = 0;
+    };
+
+    struct BufferDesc
+    {
+        std::string name;
+        VkDeviceSize size = 0;
+        VkBufferUsageFlags usage = 0;
+        // true = 跨帧常驻（初始化写一次，之后只读）；false = 每帧重写。
+        bool persistent = false;
+        // true = VMA 分配 Host-Visible 映射，用于 GPU 写、CPU 读回的调试/统计缓冲。
+        // 大块几何数据不应打开这个选项。
+        bool hostVisible = false;
+    };
+
+    // Buffer 没有 layout，只需要记录上一次的 stage/access 推导 hazard。
+    struct BufferAccess
+    {
+        BufferHandle buffer;
         VkPipelineStageFlags2 stage = 0;
         VkAccessFlags2 access = 0;
     };
@@ -120,6 +146,14 @@ public:
                           VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                           VkAccessFlags2 access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 
+        // 存储缓冲读 / 写。D-5 先覆盖 SSBO 场景（compute 剔除、体素生成等）。
+        Pass& readBuffer(BufferHandle b,
+                         VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VkAccessFlags2 access = VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        Pass& writeBuffer(BufferHandle b,
+                          VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                          VkAccessFlags2 access = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
         // 只做布局转换，不作为渲染目标。
         // 典型用途：把交换链图像转到 PRESENT_SRC_KHR 交给 present。
         Pass& transitionTo(TextureHandle t, VkImageLayout layout,
@@ -139,6 +173,7 @@ public:
         friend class RenderGraph;
         std::string name;
         std::vector<Access> accesses;
+        std::vector<BufferAccess> bufferAccesses;
         std::vector<ColorAttachment> colors;
         std::vector<DepthAttachment> depths;
         std::function<void(VkCommandBuffer)> callback;
@@ -155,7 +190,10 @@ public:
     RenderGraph& operator=(const RenderGraph&) = delete;
 
     // ---- 帧生命周期 ----
-    void beginFrame(VkCommandBuffer commandBuffer);
+    // D-5：graphics / compute 两条命令流。compute 为 VK_NULL_HANDLE 时，
+    // 所有 pass 仍按原来的单队列路径记录（便于旧调用方/测试降级）。
+    void beginFrame(VkCommandBuffer graphicsCommandBuffer,
+                    VkCommandBuffer computeCommandBuffer = VK_NULL_HANDLE);
     void endFrame();     // 按顺序执行所有 Pass
 
     // ---- Pass 注册 ----
@@ -170,11 +208,19 @@ public:
     TextureHandle importTexture(const TextureDesc& desc, VkImage image, VkImageView view,
                                 VkImageLayout initialLayout = VK_IMAGE_LAYOUT_UNDEFINED);
 
+    BufferHandle createBuffer(const BufferDesc& desc);
+    BufferHandle importBuffer(const BufferDesc& desc, VkBuffer buffer);
+
     VkImage     getImage(TextureHandle h) const;
     VkImageView getView(TextureHandle h) const;
     VkFormat    getFormat(TextureHandle h) const;
     VkExtent2D  getExtent(TextureHandle h) const;
     const TextureDesc& getDesc(TextureHandle h) const;
+
+    VkBuffer    getBuffer(BufferHandle h) const;
+    const BufferDesc& getBufferDesc(BufferHandle h) const;
+    void*       getBufferMapped(BufferHandle h) const;
+    void        invalidateBuffer(BufferHandle h) const;
 
     // 供 ImGui 面板开关某个 Pass
     void setPassEnabled(const std::string& passName, bool enabled);
@@ -203,8 +249,22 @@ private:
         VkAccessFlags2 access = VK_ACCESS_2_NONE;
     };
 
+    struct BufferEntry
+    {
+        BufferDesc desc;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        bool owned = false;
+
+        VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_NONE;
+        VkAccessFlags2 access = VK_ACCESS_2_NONE;
+    };
+
     void createOwnedTexture(TextureEntry& entry);
-    void emitBarrierIfNeeded(const Access& acc);
+    void createOwnedBuffer(BufferEntry& entry);
+    void emitBarrierIfNeeded(const Access& acc, VkCommandBuffer target);
+    void emitBufferBarrierIfNeeded(const BufferAccess& acc, VkCommandBuffer target);
 
     // 语义校验：瞬时资源每帧必须有人写。
     // 与屏障推导（同步正确性）是两件不同的事 —— 这个查的是"语义正确性"，
@@ -212,7 +272,9 @@ private:
     void validateWriteCoverage() const;
 
     Device& device;
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;          // graphics command buffer
+    VkCommandBuffer computeCmd = VK_NULL_HANDLE;   // async compute command buffer
     std::vector<TextureEntry> textures;
+    std::vector<BufferEntry> buffers;
     std::vector<std::unique_ptr<Pass>> passes;
 };

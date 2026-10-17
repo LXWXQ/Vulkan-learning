@@ -54,7 +54,9 @@ D-2 提交时记录的前后对照（同一个机位、鼠标移出窗口保证�
 | `dynamicRendering` | 必需 | 1.3 核心。没有 `VkRenderPass` / `VkFramebuffer`，全靠 `vkCmdBeginRendering/EndRendering` |
 | `synchronization2` | 必需 | 1.3 核心。屏障统一走 `vkCmdPipelineBarrier2` + `VkImageMemoryBarrier2` |
 | `samplerAnisotropy` | 启用 | 1.0 特性，纹理采样器 `maxAnisotropy = 16` |
+| `timelineSemaphore` | 必需（D-4） | Vulkan 1.2 特性；`Renderer` 用它按 frame slot 追踪 GPU 完成值 |
 | 设备扩展 | 只有 `VK_KHR_SWAPCHAIN_EXTENSION_NAME` | 1.3 之后不需要再手动开 dynamic rendering / sync2 扩展 |
+| 队列 | graphics / present / compute | D-5 优先选独立 compute family；没有则 compute 回退 graphics family |
 | 呈现模式 | `VK_PRESENT_MODE_IMMEDIATE_KHR` | 无垂直同步，跑分友好、会撕裂 |
 
 `Device::createLogicalDevice()` 会**先查询** `VkPhysicalDeviceVulkan13Features` 的 `dynamicRendering` / `synchronization2`，不支持就直接抛异常。这是有意的：本引擎不再为老 GPU 保留回退路径。
@@ -130,7 +132,7 @@ cmake --build build --config Debug
    file(GLOB SHADER_FILES CONFIGURE_DEPENDS "shaders/*.vert" "shaders/*.frag" "shaders/*.comp")
    ```
    每个 `.vert/.frag/.comp` 各挂一条 `add_custom_command(TARGET ... PRE_BUILD)`，调 `glslangValidator -V <src> -o <build>/shaders/<name>.spv`。
-   `.comp` 已经在 glob 里了 —— D-5（Compute）来的时候不用改这段。
+   `.comp` 已经在 glob 里了 —— D-5 已直接复用这段构建逻辑。
 
 3. **全局注入 tinygltf 的两个宏**
    ```cmake
@@ -219,6 +221,7 @@ VulkanEngine/
     │   ├── Application.h/.cpp        # FirstApp：构造顺序 orchestrator + run/update/render
     │   ├── Descriptor.h/.cpp         # 【已废弃】DescriptorAllocator + DescriptorBuilder，不在渲染路径上
     │   ├── DescriptorManager.h/.cpp  # 描述符池 / Set 0 全局 / Set 1 材质槽位（唯一在用的描述符系统）
+    │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
     │   ├── FrameInfo.h               # GlobalUbo + EngineSettings + RenderTelemetry + FrameInfo（每帧数据总线）+ std140 静态断言
     │   ├── ImGuiSystem.h/.cpp        # ImGui 初始化 + 面板 + prepareDrawData/renderDrawData 两段式
     │   ├── Material.h                # PBR 材质 + 缺贴图时的静态兜底 VkDescriptorImageInfo
@@ -241,9 +244,9 @@ VulkanEngine/
     │   ├── RenderGraph.h/.cpp        # 线性渲染图：自动屏障 + 动态渲染作用域（**核心**）
     │   ├── Device.h/.cpp             # 实例/物理设备/逻辑设备/队列/VMA + 验证层 + findDepthFormat
     │   ├── Swapchain.h/.cpp          # 交换链 + ImageView（**depth 资源已无人使用**，见 12 节）
-    │   ├── Renderer.h/.cpp           # 帧生命周期：1 命令缓冲 / 1 fence / 2 semaphore
+    │   ├── Renderer.h/.cpp           # 帧生命周期：2 帧在飞 + graphics/compute 双命令流 / 双 timeline
     │   ├── GBuffer.h/.cpp            # 5 附件的创建/销毁 + GBufferFormat 格式常量 + NEAREST 采样器
-    │   ├── Pipeline.h/.cpp           # 图形管线封装：动态状态 + VkPipelineRenderingCreateInfo（无 RenderPass）
+    │   ├── Pipeline.h/.cpp           # 图形管线 + ComputePipeline 封装
     │   ├── Texture.h/.cpp            # 文件/内存 → 纹理；LDR(sRGB/UNORM) 与 HDR(RGBA32F) 两条路径
     │   └── CubemapTexture.h/.cpp     # 立方体贴图：一个 CUBE view + 每 (mip, face) 一个 2D view
     └── Scene/
@@ -1036,6 +1039,8 @@ Remove-Item Env:\SENTINEL_SIMULATE_SSAO_SKIP
 | **W1** | **运行时配置持久化**（`EngineConfig` + `config/engine.json` + 面板 Save/Reload）；顺带修掉**析构顺序导致的 VMA 泄漏**（这个 bug 一直被 TerminateProcess 掩盖着） | ✅ `25ae42f` |
 | **W2** | **渲染图语义校验**：瞬时资源每帧必须有人写，否则 `endFrame` 直接抛异常。沿途逼出两个设计修正（Bloom 关闭改为强度置零、`importTexture` 常驻判定回写 desc） | ✅ `4986022` |
 | **D-3** | **Bindless 材质描述符**（`descriptorIndexing`）：材质从"每材质一个 set"改成"一个 set 里 4 个纹理数组"，下标走 push constant。**`desc binds` 104 → 1**，FPS 452 → 498 | ✅ `bc703c0` |
+| **D-4（本地）** | **多帧并行 + timeline semaphore**：2 帧在飞；每帧命令缓冲 / timeline 值 / UBO / G-Buffer / SSAO / HDR / Bloom / 描述符集全部隔离；`FrameInfo` 拆分 `frameInFlightIndex` / `swapchainImageIndex` / `frameNumber` | 🟡 工作区未提交 |
+| **D-5（本地）** | **Compute + 异步计算队列**：独立 compute queue / command pool / timeline；`ComputePipeline`；RenderGraph 的 storage buffer handle、buffer barrier、compute pass 与 buffer 语义校验；`ComputeProbePass` 完成 GPU 写 + CPU 读回验证 | 🟡 工作区未提交 |
 
 **D-2 一共动了 25 个文件、+1039 行**，其中新增了 4 个 Pass 级文件（`BloomPass.*` / `PresentPass.*`）和 4 个 shader（`bloom_bright/down/up.frag` / `present.frag`）。
 值得注意的是：**这 9 个新 Pass（1 亮部提取 + 3 降采样 + 3 上采样 + 1 Present + 1 PresentTransition）没有写一行屏障代码** —— 每个 Pass 只是声明 `read` / `writeColor`，同步全由渲染图推导。这是渲染图第一次被真正压力测试。
@@ -1056,14 +1061,14 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
 | 里程碑 | 内容 | 为什么排在这个位置 |
 |--------|------|-------------------|
 | ~~D-3~~ | ~~Bindless（`descriptorIndexing`）~~ | ✅ **已完成**（`bc703c0`）。`desc binds` 104 → 1，FPS 452 → 498。 |
-| **D-4** | **多帧并行 + timeline semaphore** | 现在 `Renderer` 是**单缓冲**：1 个命令缓冲、1 个 fence、2 个 semaphore → GPU 和 CPU 没法重叠。改成 2~3 帧在飞（per-frame 命令缓冲 + fence + `VkSemaphoreTypeTimeline`）。注意：这一步会**同时**要求 `FrameInfo`/UBO/描述符 都变成 per-frame-in-flight（现在 UBO 只有一份，`memcpy` 会被下一帧覆盖）。 |
-| **D-5** | **Compute + 异步计算队列** | 为地形剔除 / 体素生成 / Bloom 的 compute 版做准备。`RenderGraph` 已经有 `addComputePass` / `writeStorage` / `readStorage` 的**骨架**，但 `endFrame` 里的 `isCompute` 标志**从未被读取**，也没有 buffer 支持 —— 这一步要把这块补完。CMake 的 shader glob 已经包含 `.comp`。⚠️ 同时必须把 W2 的语义校验扩展到 buffer（现在只管图），否则新资源类型回到"靠人记"。 |
+| ~~D-4~~ | ~~多帧并行 + timeline semaphore~~ | ✅ **已完成（本地工作区，未提交）**：2 帧在飞；`--selftest` 四种组合各 120 帧 stderr 0；实测 566 FPS。 |
+| ~~D-5~~ | ~~Compute + 异步计算队列~~ | ✅ **已完成（本地工作区，未提交）**：独立 compute queue + 双 timeline；RenderGraph 支持 storage buffer / compute pass / buffer barrier / buffer 语义校验；`ComputeProbePass` 验证 GPU 写 + CPU 读回。当前跨队列 producer/consumer 会显式拒绝。 |
 | **D-6** | **作业系统（Job System）** | 地形 / 体素生成必须并行。在这一步之前，所有"并行"都是假的。 |
 | **D-7** | **EnTT ECS + Transform 层级 + 空间索引** | 现在 `GameObject` 是"ECS-lite"（自增 ID + 手写成员），没有父子层级、没有空间查询。开放世界需要：Transform 层级（`Parent`/`Children`）+ 空间划分（BVH / 网格网格 / 体素块索引）用于剔除与查询。EnTT 依赖**已经拉进来了但一次没用**。 |
 
 > D-3 完成意味着**"后面所有性能工作的前提"已经就位**：现在一次绑定可以画完整个场景。
-> 下一步 D-4（多帧并行）之所以排在实例化/剔除之前，是因为它改动的是帧资源生命周期 ——
-> 越晚做，需要跟着改的东西越多（UBO、描述符、渲染图的瞬时图、命令缓冲）。
+> D-4 已完成：帧资源生命周期（命令缓冲、UBO、描述符集、渲染图瞬时图）都已按 frame slot 隔离。
+> 下一步是 D-6（作业系统 / Job System）。
 
 ### 已知技术债 / 代码与文档不一致的地方（**已验证，不是猜测**）
 
@@ -1080,7 +1085,7 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
    > 与 Bloom 的情况**不完全同类**，这个区别值得记：`PresentPass` 也无条件 `read(bloomResult)`，但它在着色器里用 `bloomEnabled` 把采样整个跳过了 —— 那只是"多发了一层无意义的屏障"，不是语义缺陷。当时只给 Bloom 做了 `--selftest --no-bloom` 就以为覆盖住了，实际上真正有洞的是 SSAO。**教训：覆盖"某条分支"不等于覆盖"这类分支"。**
 3. **`ReleaseMaterialSet()` 没有任何调用方。** 槽位回收 API 已经写好（`freeSlots` 栈 + `slotInUse`），但 `MaterialSystem::cleanup()` 只是 `materials.clear()`，从不归还槽位。也就是说"可回收"目前只是能力，没有使用者。
 4. **`RenderGraph::setPassEnabled(name, enabled)` 实际不可用**（帧间 `passes` 是空的），见第 9 节。
-5. **`RenderGraph` 的 compute 路径只有骨架**：`addComputePass` 设置 `isCompute`，但 `endFrame` 里判断"是否开动态渲染"只看有没有颜色/深度附件，`isCompute` 从未被读取；而且渲染图**完全不支持 buffer**（只有 image）。`writeStorage/readStorage` 只能作用于 image。
+5. ~~**`RenderGraph` 的 compute 路径只有骨架**~~ → **D-5 已补**：`addComputePass` 会记录到独立 compute command buffer；新增 `BufferHandle` / `readBuffer` / `writeBuffer` / buffer barrier，并把 buffer 纳入语义校验。仍需补跨队列 producer/consumer 调度。
 6. **`Pass::writeDepth` 会静默改写清屏值**：`clear.depthStencil.depth == 0.0f && stencil == 0` 时被改成 `{1.0f, 0}`。想真的把深度清成 0 的调用方会被坑。
 7. **`Swapchain` 里的深度资源已经没人用了**：构造函数仍然调 `createDepthResources()`（分配一张 depth image + view），但深度现在由 `GBuffer` 持有。同时 `swapChainFramebuffers` 永远是空的（`createFramebuffers(VkRenderPass)` 已无人调用），析构里那个循环是空转。`getFramebuffer()` / `getDepthImageView()` / `createFramebuffers()` 都是死接口。
 8. **`IBLBaker` 里有死代码**：匿名命名空间的 `createOffscreenRenderPass()` 定义后从未调用；`makeFramebuffer()` 定义后从未调用；`pendingFramebuffers` / `cubeRenderPass` / `lutRenderPass` 都是 D-1(b) 迁移到动态渲染之后的残留（`createRenderPasses()` 现在是空函数，注释说明了"保留成空函数是为了不动 bake() 的调用顺序"）。
@@ -1107,9 +1112,9 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
     **重新权衡的时机**：Bloom 变重时（加多级金字塔、改成 compute 版、或接入自动曝光用它的 mip 链）。
 18. **`EngineConfig` 没有版本迁移，也没有多套预设**。`version` 字段写进去了但没人读；
     想加画质档位（低/中/高）需要扩展成目录 + 名字，现在只有一个 `engine.json`。
-19. **W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip / 层**。
-    引入 storage buffer（D-5）时必须一并扩展 —— 否则新资源类型立刻回到"靠人记"的状态，
-    而这正是 W2 想消灭的东西。
+19. ~~**W2 的语义校验只管"图"，覆盖不到 buffer 和单个 mip / 层**。~~
+    > ✅ **D-5 已扩展到 storage buffer**：瞬时 buffer 若在本帧被读但没人写，会像纹理一样抛错。
+    > 单个 mip / 层的独立读写仍未细分，等真正出现分层资源时再补。
 20. **验证脚本的两个隐含前提没有自动化保护**：必须"正常关窗退出"（否则覆盖不到析构路径，
     见坑 15）、必须"确认窗口到了前台"（否则截到桌面，数字看着正常但毫无意义）。
     两条都在脚本里做了显式检查并在失败时**丢弃结果**，但它们是外部脚本（在 `%TEMP%` 下），
@@ -1119,14 +1124,20 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
     描述符 + 一次 `vkUpdateDescriptorSets`。256 个材质 = 256 个无用描述符（占总量 1/4）。
     **重新权衡的时机**：启用切线空间法线贴图时（要么让模型提供可靠切线，
     要么在 `mrt.frag` 里用偏导数构造 TBN 并处理 UV 接缝 —— 那个函数已经写好了）。
-22. **bindless 之后"运行期动态分配/复用材质槽位"有新的同步约束，目前没有防护（D-3）**。
-    复用槽位 = 改写 GPU 可能正在读的数组项。当前所有材质都在初始化阶段分配
-    （此时 `vkDeviceWaitIdle` 过），所以安全；但代码里**没有断言或检查**这一点 ——
-    将来有人在加载新场景时调 `allocateMaterialSet`，会以"随机贴图错乱"的形式暴露，
-    而不是一个明确的错误。修法：加帧 fence，或上 `UPDATE_AFTER_BIND` + 双缓冲。
-    已写在 `DescriptorManager::releaseMaterialSet` 的注释里，但注释不是防护。
+22. ~~**bindless 之后"运行期动态分配/复用材质槽位"有新的同步约束，目前没有防护（D-3）**。~~
+    > ✅ **D-4 已修**：`releaseMaterialSet()` 在归还槽位前执行一次 `vkDeviceWaitIdle`，
+    > 保证 GPU 不再读取被复用的数组项。当前没有运行期回收调用方，因此不构成热路径开销；
+    > 若将来把材质流送放进每帧路径，应升级成基于 timeline semaphore 的延迟回收队列
+    > 或 `UPDATE_AFTER_BIND` + 双缓冲。
+23. **D-5 的异步 compute 尚不支持跨队列 producer/consumer**。compute 写、graphics 读，
+    或 graphics 写、compute 读，目前会被 RenderGraph 显式拒绝（没有静默竞争）。
+    真正的 GPU culling / 体素生成要把 indirect draw buffer 交给 graphics 消费时必须补：
+    跨队列 ownership transfer（或 concurrent sharing）+ 双向 timeline semaphore 调度。
+    这是 D-5 之后、接入 GPU 剔除/体素任务之前的第一优先级。
+    另：当前 `ComputeProbePass` 是验收探针，本身有固定 GPU 开销；真正的 compute 任务
+    接入后应删除或改为可选调试项。
 
-> 上面 1~3 是**会实际影响画面/正确性**的；4~12 是清理类；13~16 是命名/生命周期/一致性类；**17~22 是 W 阶段与 D-3 自己引入或暴露的**，其中 17、19、21、22 都有明确的"何时重新权衡 / 何时必须修"。
+> 上面 1~3 是**会实际影响画面/正确性**的；4~12 是清理类；13~16 是命名/生命周期/一致性类；**17~23 是 W / D-3 / D-5 自己引入或暴露的**，其中 17、19、21、22、23 都有明确的"何时重新权衡 / 何时必须修"。
 
 ---
 

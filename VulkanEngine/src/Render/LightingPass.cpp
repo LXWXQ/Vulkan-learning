@@ -31,15 +31,18 @@ void LightingPass::init()
             VK_IMAGE_LAYOUT_UNDEFINED);
     }
 
-    // D-2：光照的终点是这张线性 HDR 图，不再是交换链。
-    // 由渲染图持有 —— 它的尺寸/格式要和 LightingSystem 里的管线完全对齐。
+    // D-2：光照的终点是线性 HDR 图，不再是交换链。
+    // D-4：每个 frame slot 一张，避免第 N+1 帧覆盖 GPU 仍在读的第 N 帧结果。
     // 这里顺便承担了"交换链资源导入"的职责，所以 PresentPass 依赖 LightingPass 先 init。
-    RenderGraph::TextureDesc hdrDesc;
-    hdrDesc.name = "HDR.Scene";
-    hdrDesc.format = kHdrSceneFormat;
-    hdrDesc.extent = vulkanSwapchain.getSwapChainExtent();
-    hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    resources.hdrScene = renderGraph.createTexture(hdrDesc);
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        RenderGraph::TextureDesc hdrDesc;
+        hdrDesc.name = "HDR.Scene.Frame" + std::to_string(frame);
+        hdrDesc.format = kHdrSceneFormat;
+        hdrDesc.extent = vulkanSwapchain.getSwapChainExtent();
+        hdrDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        resources.hdrScene[frame] = renderGraph.createTexture(hdrDesc);
+    }
 
     lightingSystem = std::make_unique<LightingSystem>(vulkanDevice, globalSetLayout);
 }
@@ -49,15 +52,16 @@ void LightingPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     VkClearValue clear{};
     clear.color = { { 0.01f, 0.01f, 0.01f, 1.0f } };
 
+    const uint32_t frame = frameInfo.frameInFlightIndex;
     auto& pass = graph.addGraphicsPass("Lighting");
 
     // 声明所有采样输入 —— 渲染图靠这些声明推导布局转换和屏障，
     // 之前这些依赖是「隐式」的，全靠手工维护，非常容易漏。
-    pass.read(resources.gbPosition);
-    pass.read(resources.gbNormal);
-    pass.read(resources.gbAlbedo);
-    pass.read(resources.gbPbr);
-    pass.read(resources.ssao, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    pass.read(resources.gbPosition[frame]);
+    pass.read(resources.gbNormal[frame]);
+    pass.read(resources.gbAlbedo[frame]);
+    pass.read(resources.gbPbr[frame]);
+    pass.read(resources.ssao[frame], VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     pass.read(resources.environment);
     pass.read(resources.irradiance);
     pass.read(resources.prefiltered);
@@ -65,11 +69,11 @@ void LightingPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 
     // D-2：写 HDR 中间目标。这一句就是"把后效链接进去"的全部代价 ——
     // 交换链不再出现在这里，谁最终写交换链由 PresentPass 决定。
-    pass.writeColor(resources.hdrScene, VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
+    pass.writeColor(resources.hdrScene[frame], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
-    pass.execute([this, &frameInfo](VkCommandBuffer cmd)
+    pass.execute([this, &frameInfo, frame](VkCommandBuffer cmd)
     {
-        VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet();
+        VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet(frame);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
             lightingSystem->getPipelineLayout(), 0, 1, &globalSet, 0, nullptr);
 

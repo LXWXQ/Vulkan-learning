@@ -12,15 +12,18 @@ void DescriptorManager::init(Device& dev, uint32_t maxMaterials)
 
 	// 池容量按 maxMaterials 推算，不再硬编码 —— 否则把 maxMaterials 调大时，
 	// 池会在 vkCreateDescriptorPool 阶段直接失败。
-	// 除材质外还要容纳：全局 set 1 个、SSAO local 1 个、Bloom 7 个
-	//（1 亮部提取 + 3 降采样 + 3 上采样）、Present 1 个 —— D-2 起后效链
-	// 每个 Pass 都有自己的 set，所以这里的余量必须跟着涨。
+	// 除材质外还要容纳（D-4 起全部 × kFramesInFlight）：全局 set、SSAO local、
+	// Bloom 7 个（1 亮部提取 + 3 降采样 + 3 上采样）、Present —— 后效链
+	// 每个 Pass 都有自己的 set，所以这里的余量必须跟着帧数和 Pass 数一起涨。
 	//
 	// D-3 变化：材质从"每材质 4 个独立 descriptor"变成"4 个数组各 maxMaterials 项"，
 	// 描述符总数不变（还是 maxMaterials * 4），但 **set 数从 maxMaterials 降到 1**。
 	std::vector<VkDescriptorPoolSize> poolSizes = {
 		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         maxMaterials + 16 },
-		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxMaterials * 4 + 96 }
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxMaterials * 4 + 96 },
+		// D-5：compute pass 的 SSBO。数量很小，但要显式计入，否则
+		// ComputeProbePass 在 vkAllocateDescriptorSets 时会直接失败。
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         64 }
 	};
 
 	VkDescriptorPoolCreateInfo poolInfo{};
@@ -72,7 +75,7 @@ void DescriptorManager::cleanup()
 	// VkDescriptorSet 会随描述符池一起销毁，这里只需要清掉索引表
 	slotInUse.clear();
 	freeSlots.clear();
-	globalSet = VK_NULL_HANDLE;
+	globalSets.clear();
 	materialSet = VK_NULL_HANDLE;
 	materialCapacity = 0;
 
@@ -179,55 +182,63 @@ VkDescriptorSetLayout DescriptorManager::createSetLayout(const std::vector<VkDes
 	return layout;
 }
 
-void DescriptorManager::buildGlobalSet(VkBuffer uboBuffer,
+void DescriptorManager::buildGlobalSet(
+	const std::array<VkBuffer, kFramesInFlight>& uboBuffers,
 	const VkDescriptorImageInfo& envInfo,
-	const GBuffer& gBuffer,
-	VkSampler ssaoSampler, VkImageView ssaoView,
+	const std::array<const GBuffer*, kFramesInFlight>& gBuffers,
+	VkSampler ssaoSampler, const std::array<VkImageView, kFramesInFlight>& ssaoViews,
 	const VkDescriptorImageInfo& irradianceInfo,
 	const VkDescriptorImageInfo& prefilteredInfo,
 	const VkDescriptorImageInfo& brdfLutInfo)
 {
-	globalSet = allocateSet(globalSetLayout);
+	globalSets.resize(kFramesInFlight, VK_NULL_HANDLE);
 
-	VkDescriptorBufferInfo uboInfo{ uboBuffer, 0, sizeof(GlobalUbo) };
-
-	VkDescriptorImageInfo posInfo{ gBuffer.getSampler(), gBuffer.getPosition().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo normInfo{ gBuffer.getSampler(), gBuffer.getNormal().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo albInfo{ gBuffer.getSampler(), gBuffer.getAlbedo().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo pbrInfo{ gBuffer.getSampler(), gBuffer.getPbr().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo ssaoInfo{ ssaoSampler, ssaoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-
-	VkDescriptorImageInfo envCopy = envInfo;
-	VkDescriptorImageInfo irradianceCopy = irradianceInfo;
-	VkDescriptorImageInfo prefilteredCopy = prefilteredInfo;
-	VkDescriptorImageInfo brdfLutCopy = brdfLutInfo;
-
-	// 顺序必须和 createGlobalLayout 里的 binding 号一一对应
-	VkDescriptorImageInfo imageInfos[] = {
-		envCopy, posInfo, normInfo, albInfo, pbrInfo, ssaoInfo,
-		irradianceCopy, prefilteredCopy, brdfLutCopy
-	};
-
-	std::vector<VkWriteDescriptorSet> writes(10);
-
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = globalSet;
-	writes[0].dstBinding = 0;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	writes[0].descriptorCount = 1;
-	writes[0].pBufferInfo = &uboInfo;
-
-	for (int i = 0; i < 9; i++)
+	for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
 	{
-		writes[i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[i + 1].dstSet = globalSet;
-		writes[i + 1].dstBinding = static_cast<uint32_t>(i + 1);
-		writes[i + 1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writes[i + 1].descriptorCount = 1;
-		writes[i + 1].pImageInfo = &imageInfos[i];
-	}
+		globalSets[frame] = allocateSet(globalSetLayout);
 
-	vkUpdateDescriptorSets(device->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+		VkDescriptorBufferInfo uboInfo{ uboBuffers[frame], 0, sizeof(GlobalUbo) };
+		const GBuffer& gBuffer = *gBuffers[frame];
+
+		VkDescriptorImageInfo posInfo{ gBuffer.getSampler(), gBuffer.getPosition().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo normInfo{ gBuffer.getSampler(), gBuffer.getNormal().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo albInfo{ gBuffer.getSampler(), gBuffer.getAlbedo().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo pbrInfo{ gBuffer.getSampler(), gBuffer.getPbr().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo ssaoInfo{ ssaoSampler, ssaoViews[frame], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+		VkDescriptorImageInfo envCopy = envInfo;
+		VkDescriptorImageInfo irradianceCopy = irradianceInfo;
+		VkDescriptorImageInfo prefilteredCopy = prefilteredInfo;
+		VkDescriptorImageInfo brdfLutCopy = brdfLutInfo;
+
+		// 顺序必须和 createGlobalLayout 里的 binding 号一一对应
+		VkDescriptorImageInfo imageInfos[] = {
+			envCopy, posInfo, normInfo, albInfo, pbrInfo, ssaoInfo,
+			irradianceCopy, prefilteredCopy, brdfLutCopy
+		};
+
+		std::array<VkWriteDescriptorSet, 10> writes{};
+
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = globalSets[frame];
+		writes[0].dstBinding = 0;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		writes[0].descriptorCount = 1;
+		writes[0].pBufferInfo = &uboInfo;
+
+		for (uint32_t i = 0; i < 9; ++i)
+		{
+			writes[i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[i + 1].dstSet = globalSets[frame];
+			writes[i + 1].dstBinding = i + 1;
+			writes[i + 1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			writes[i + 1].descriptorCount = 1;
+			writes[i + 1].pImageInfo = &imageInfos[i];
+		}
+
+		vkUpdateDescriptorSets(device->getDevice(),
+			static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	}
 }
 
 uint32_t DescriptorManager::allocateMaterialSet(const VkDescriptorImageInfo& albedo,
@@ -251,6 +262,13 @@ void DescriptorManager::releaseMaterialSet(uint32_t index)
 {
 	if (index >= slotInUse.size() || !slotInUse[index])
 		return;                 // 越界或重复归还：安全忽略
+
+	// D-4 的保险：归还槽位意味着下一次 allocate 可能立刻改写 GPU 可能仍在
+	// 采样的数组项。当前没有运行期归还调用方；这里用一次 device-wide wait
+	// 保证安全，避免将来动态加载材质时出现随机贴图错乱。
+	// 热路径若真的需要回收，应改成基于 timeline semaphore 的延迟回收队列。
+	if (device != nullptr && device->getDevice() != VK_NULL_HANDLE)
+		vkDeviceWaitIdle(device->getDevice());
 
 	slotInUse[index] = false;
 	freeSlots.push_back(index);

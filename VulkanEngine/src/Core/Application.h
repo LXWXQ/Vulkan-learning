@@ -14,6 +14,7 @@
 #include "Scene/Scene.h"
 #include <memory>
 #include <chrono>
+#include <array>
 
 class FirstApp
 {
@@ -55,7 +56,7 @@ private:
 	std::unique_ptr<Device> vulkanDevice;
 	std::unique_ptr<Swapchain> vulkanSwapchain;
 	std::unique_ptr<Renderer> renderer;
-	std::unique_ptr<GBuffer> gBuffer;
+	std::array<std::unique_ptr<GBuffer>, kFramesInFlight> gBuffers;
 	std::unique_ptr<DescriptorManager> descriptorManager;
 	std::unique_ptr<Scene> scene;
 	std::unique_ptr<ImGuiSystem> imguiSystem;
@@ -67,9 +68,9 @@ private:
 	std::unique_ptr<RenderGraph> renderGraph;
 	std::unique_ptr<RenderResources> renderResources;
 
-	VkBuffer globalUboBuffer = VK_NULL_HANDLE;
-	VmaAllocation globalUboAllocation = VK_NULL_HANDLE;
-	void* uboMapped = nullptr;
+	std::array<VkBuffer, kFramesInFlight> globalUboBuffers{};
+	std::array<VmaAllocation, kFramesInFlight> globalUboAllocations{};
+	std::array<void*, kFramesInFlight> uboMapped{};
 
 	std::unique_ptr<Texture> environmentTex;
 

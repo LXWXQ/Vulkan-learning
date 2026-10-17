@@ -185,3 +185,66 @@ void Pipeline::defaultPipelineConfigInfo(PipelineConfigInfo& configInfo, uint32_
     // 注意：启用后，每个 Pass 在绑定管线后、绘制前都必须调用 cmdSetFullViewportAndScissor()
     configInfo.dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 }
+// ============================================================================
+// ComputePipeline
+// ============================================================================
+
+ComputePipeline::ComputePipeline(Device& device, const std::string& compFilepath,
+                                 VkPipelineLayout pipelineLayout)
+    : device(device)
+{
+    const std::vector<char> code = readFile(compFilepath);
+    createShaderModule(device, code, &shaderModule);
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = shaderModule;
+    stage.pName = "main";
+
+    VkComputePipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    info.stage = stage;
+    info.layout = pipelineLayout;
+
+    if (vkCreateComputePipelines(device.getDevice(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS)
+        throw std::runtime_error("failed to create compute pipeline!");
+}
+
+ComputePipeline::~ComputePipeline()
+{
+    if (pipeline != VK_NULL_HANDLE)
+        vkDestroyPipeline(device.getDevice(), pipeline, nullptr);
+    if (shaderModule != VK_NULL_HANDLE)
+        vkDestroyShaderModule(device.getDevice(), shaderModule, nullptr);
+}
+
+void ComputePipeline::bind(VkCommandBuffer commandBuffer)
+{
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+}
+
+std::vector<char> ComputePipeline::readFile(const std::string& filepath)
+{
+    std::ifstream file(filepath, std::ios::ate | std::ios::binary);
+    if (!file.is_open())
+        throw std::runtime_error("failed to open file: " + filepath);
+
+    const size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    return buffer;
+}
+
+void ComputePipeline::createShaderModule(Device& device, const std::vector<char>& code,
+                                         VkShaderModule* module)
+{
+    VkShaderModuleCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = code.size();
+    info.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+    if (vkCreateShaderModule(device.getDevice(), &info, nullptr, module) != VK_SUCCESS)
+        throw std::runtime_error("failed to create compute shader module!");
+}

@@ -8,6 +8,8 @@
 #include "Core/DescriptorManager.h"
 #include "Core/ImGuiSystem.h"
 #include <memory>
+#include <array>
+#include "Core/FrameInFlight.h"
 
 // ---------------------------------------------------------------------------
 // D-2: PresentPass —— 后效链的终点
@@ -56,7 +58,7 @@ private:
 
     VkSampler sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-    VkDescriptorSet set = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> sets{};
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unique_ptr<Pipeline> pipeline;
 

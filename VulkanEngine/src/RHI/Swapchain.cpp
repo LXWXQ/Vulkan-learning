@@ -1,6 +1,7 @@
 #include "Swapchain.h"
 #include <stdexcept>
 #include <array>
+#include <algorithm>
 
 Swapchain::Swapchain(Device& deviceRef, VkExtent2D windowExtent)
     : device(deviceRef), windowExtent(windowExtent) 
@@ -37,7 +38,24 @@ void Swapchain::createSwapChain()
 
     VkSurfaceFormatKHR surfaceFormat = swapChainSupport.formats[0];
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;//VK_PRESENT_MODE_FIFO_KHR 垂直同步  VK_PRESENT_MODE_IMMEDIATE_KHR 无垂直同步，可能会撕裂 VK_PRESENT_MODE_MAILBOX_KHR 低延迟，适合高帧率，可能会丢帧
+
+    // Windows 下窗口被标题栏/任务栏挤占时，请求的客户区尺寸可能被系统裁小。
+    // 只要 surface 给出了 currentExtent，交换链就必须严格使用它，否则验证层
+    // 会报 imageExtent 越界，随后 acquire/present 全部失效。
     VkExtent2D extent = windowExtent;
+    if (swapChainSupport.capabilities.currentExtent.width != UINT32_MAX)
+    {
+        extent = swapChainSupport.capabilities.currentExtent;
+    }
+    else
+    {
+        extent.width = std::clamp(extent.width,
+            swapChainSupport.capabilities.minImageExtent.width,
+            swapChainSupport.capabilities.maxImageExtent.width);
+        extent.height = std::clamp(extent.height,
+            swapChainSupport.capabilities.minImageExtent.height,
+            swapChainSupport.capabilities.maxImageExtent.height);
+    }
 
     uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
     if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) 

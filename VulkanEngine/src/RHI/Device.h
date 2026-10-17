@@ -13,10 +13,12 @@ struct QueueFamilyIndices
 {
     std::optional<uint32_t> graphicsFamily;
     std::optional<uint32_t> presentFamily;
+    // D-5：优先选择独立 compute family；没有独立队列时回退到 graphics family。
+    std::optional<uint32_t> computeFamily;
 
     bool isComplete() 
     {
-        return graphicsFamily.has_value() && presentFamily.has_value();
+        return graphicsFamily.has_value() && presentFamily.has_value() && computeFamily.has_value();
     }
 };
 
@@ -34,6 +36,8 @@ public:
     VkSurfaceKHR getSurface() { return surface; }
     VkQueue getGraphicsQueue() { return graphicsQueue; }
 	VkQueue getPresentQueue() { return presentQueue; }
+	VkQueue getComputeQueue() { return computeQueue; }
+	bool hasDedicatedComputeQueue() const { return dedicatedComputeQueue; }
 	VkInstance getInstance() { return instance; }
 	VmaAllocator getVmaAllocator() { return vmaAllocator; }
 
@@ -75,6 +79,8 @@ private:
 	VkDevice device;
 	VkQueue graphicsQueue;
 	VkQueue presentQueue;
+	VkQueue computeQueue;
+	bool dedicatedComputeQueue = false;
 	VmaAllocator vmaAllocator;
 
     const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };

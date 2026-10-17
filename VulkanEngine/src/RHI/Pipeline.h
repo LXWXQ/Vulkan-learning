@@ -53,3 +53,25 @@ private:
     VkShaderModule vertShaderModule;
     VkShaderModule fragShaderModule;
 };
+// D-5：Compute 管线只包含一个 compute shader，不需要动态渲染附件 / 顶点输入 /
+// 光栅状态。单独成类是为了让图形管线的配置结构保持干净，也避免在
+// PipelineConfigInfo 里塞一堆 compute 用不到但必须置空的字段。
+class ComputePipeline
+{
+public:
+    ComputePipeline(Device& device, const std::string& compFilepath, VkPipelineLayout pipelineLayout);
+    ~ComputePipeline();
+
+    ComputePipeline(const ComputePipeline&) = delete;
+    ComputePipeline& operator=(const ComputePipeline&) = delete;
+
+    void bind(VkCommandBuffer commandBuffer);
+
+private:
+    static std::vector<char> readFile(const std::string& filepath);
+    static void createShaderModule(Device& device, const std::vector<char>& code, VkShaderModule* module);
+
+    Device& device;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+};

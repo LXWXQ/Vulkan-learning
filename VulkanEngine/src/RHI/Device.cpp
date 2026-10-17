@@ -188,7 +188,11 @@ void Device::createLogicalDevice()
     QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
     std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-    std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+    std::set<uint32_t> uniqueQueueFamilies = {
+        indices.graphicsFamily.value(),
+        indices.presentFamily.value(),
+        indices.computeFamily.value()
+    };
 
     float queuePriority = 1.0f;
     for (uint32_t queueFamily : uniqueQueueFamilies)
@@ -238,6 +242,12 @@ void Device::createLogicalDevice()
             "descriptorBindingVariableDescriptorCount）。");
     }
 
+    // D-4：多帧在飞需要按数值等待某一帧的 GPU 工作完成。
+    // timelineSemaphore 是 Vulkan 1.2 core feature；虽然实例 API 版本是 1.3，
+    // 设备特性仍然必须显式启用。
+    if (!supported12.timelineSemaphore)
+        throw std::runtime_error("GPU 不支持 timelineSemaphore；D-4 多帧在飞无法安全实现。");
+
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     features12.descriptorIndexing = VK_TRUE;
@@ -251,6 +261,8 @@ void Device::createLogicalDevice()
     // 注意这是一个**独立于 runtimeDescriptorArray 的开关** —— 少了它，
     // 布局里带 VARIABLE_DESCRIPTOR_COUNT_BIT 会被验证层直接拒绝。
     features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    // D-4：用 timeline semaphore 追踪每个 frame slot 的 GPU 完成进度。
+    features12.timelineSemaphore = VK_TRUE;
 
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -294,6 +306,14 @@ void Device::createLogicalDevice()
 
     vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
     vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+    vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
+    dedicatedComputeQueue = indices.computeFamily.value() != indices.graphicsFamily.value();
+
+    std::cout << "[Device] Queue families: graphics=" << indices.graphicsFamily.value()
+              << " present=" << indices.presentFamily.value()
+              << " compute=" << indices.computeFamily.value()
+              << (dedicatedComputeQueue ? " (dedicated async compute)" : " (fallback: graphics queue)")
+              << "\n";
 
     VmaAllocatorCreateInfo allocatorInfo{};
     allocatorInfo.physicalDevice = physicalDevice;
@@ -340,22 +360,31 @@ QueueFamilyIndices Device::findQueueFamilies(VkPhysicalDevice device)
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
-    int i = 0;
-    for (const auto& queueFamily : queueFamilies) 
+    for (uint32_t i = 0; i < queueFamilyCount; ++i)
     {
-        if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) 
-        {
+        const VkQueueFamilyProperties& queueFamily = queueFamilies[i];
+
+        if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && !indices.graphicsFamily)
             indices.graphicsFamily = i;
+
+        if (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)
+        {
+            // 优先独立 compute family；没有的话最后回退到 graphics family。
+            if (!indices.computeFamily || !(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT))
+                indices.computeFamily = i;
         }
+
         VkBool32 presentSupport = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
-        if (presentSupport) 
-        {
+        if (presentSupport)
             indices.presentFamily = i;
-        }
-        if (indices.isComplete()) break;
-        i++;
     }
+
+    // 所有常见桌面 GPU 的 graphics family 都同时支持 compute；这里仍显式回退，
+    // 让 D-5 的调度代码只有一个路径，而不是在调用处到处判断 optional。
+    if (!indices.computeFamily && indices.graphicsFamily)
+        indices.computeFamily = indices.graphicsFamily;
+
     return indices;
 }
 

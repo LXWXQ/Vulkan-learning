@@ -1,0 +1,58 @@
+#version 450
+
+// D-5 async compute 验收探针：
+//   mode 0 -> 按 frameNumber 生成一段确定性的 uint 数据；
+//   mode 1 -> 单 invocation 读回整段数据并写 checksum 到 host-visible 结果 buffer。
+//
+// 它刻意不引用任何 graphics 资源，用来独立验证：
+//   * compute 命令缓冲能在独立队列提交；
+//   * RenderGraph 的 storage buffer 读写声明和 buffer barrier 生效；
+//   * compute timeline semaphore 完成后，CPU 能安全读回结果。
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) buffer DataBuffer
+{
+    uint values[];
+} dataBuffer;
+
+layout(set = 0, binding = 1) buffer ResultBuffer
+{
+    uint magic;
+    uint frameNumber;
+    uint checksum;
+    uint count;
+} resultBuffer;
+
+layout(push_constant) uniform Push
+{
+    uint mode;
+    uint frameNumber;
+    uint count;
+    uint pad;
+} pc;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+
+    if (pc.mode == 0u)
+    {
+        if (index < pc.count)
+            dataBuffer.values[index] = index * 1664525u + pc.frameNumber * 1013904223u;
+        return;
+    }
+
+    // mode 1：只让 (0,0,0) invocation 做串行求和，避免 atomic 对结果顺序的依赖。
+    if (pc.mode == 1u && index == 0u)
+    {
+        uint sum = 0u;
+        for (uint i = 0u; i < pc.count; ++i)
+            sum += dataBuffer.values[i];
+
+        resultBuffer.magic = 0x5E471234u;
+        resultBuffer.frameNumber = pc.frameNumber;
+        resultBuffer.checksum = sum;
+        resultBuffer.count = pc.count;
+    }
+}

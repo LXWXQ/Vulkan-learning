@@ -49,6 +49,7 @@ public:
     const FrameBufferAttachment& getPbr() const { return pbr; }
     const FrameBufferAttachment& getDepth() const { return depth; }
     VkSampler getSampler() const { return sampler; }
+    VkExtent2D getExtent() const { return currentExtent; }
 
 private:
     void createAttachment(VkFormat format, VkImageUsageFlags usage, FrameBufferAttachment* attachment);

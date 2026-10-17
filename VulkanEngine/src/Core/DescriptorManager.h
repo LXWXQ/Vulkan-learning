@@ -2,6 +2,8 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstdint>
+#include <array>
+#include "Core/FrameInFlight.h"
 #include "RHI/Device.h"
 #include "RHI/GBuffer.h"
 #include "Core/MaterialSlot.h"
@@ -19,19 +21,24 @@ public:
 
 	VkDescriptorSetLayout createSetLayout(const std::vector<VkDescriptorSetLayoutBinding>& bindings);
 
-	// 全局描述符集：
+	// 全局描述符集（D-4 起每个 frame slot 一份，但 layout 相同）：
 	//  0=UBO  1=equirect 环境贴图(天空盒用)  2~5=G-Buffer  6=SSAO
 	//  7=irradiance cubemap  8=prefiltered cubemap  9=BRDF LUT
 	// 注意：D-2 之后光照通道的输出（HDR 中间目标）**不在**这里 ——
 	// 它只在后效链内部流转，用各 Pass 自己的局部 set，不占用全局集。
-	void buildGlobalSet(VkBuffer uboBuffer,
+	// D-4：每个 frame slot 一份全局描述符集，各自指向该帧专属的
+	// UBO / G-Buffer / SSAO 图像。环境贴图与 IBL 是跨帧只读资源，共享同一组。
+	void buildGlobalSet(const std::array<VkBuffer, kFramesInFlight>& uboBuffers,
 		const VkDescriptorImageInfo& envInfo,
-		const GBuffer& gBuffer,
-		VkSampler ssaoSampler, VkImageView ssaoView,
+		const std::array<const GBuffer*, kFramesInFlight>& gBuffers,
+		VkSampler ssaoSampler, const std::array<VkImageView, kFramesInFlight>& ssaoViews,
 		const VkDescriptorImageInfo& irradianceInfo,
 		const VkDescriptorImageInfo& prefilteredInfo,
 		const VkDescriptorImageInfo& brdfLutInfo);
-	VkDescriptorSet getGlobalSet() const { return globalSet; }
+	VkDescriptorSet getGlobalSet(uint32_t frameInFlightIndex) const
+	{
+		return globalSets[frameInFlightIndex];
+	}
 
 	// ---------------- 材质（D-3 起是 bindless 的）----------------
 	//
@@ -60,7 +67,7 @@ public:
 	//
 	// ⚠️ bindless 之后归还语义变了：槽位被复用时是**改写数组里那个下标的内容**，
 	// 而 GPU 可能还在读它。当前调用方只在初始化阶段分配（此时设备空闲），
-	// 所以没问题；一旦将来要在运行期动态分配材质，必须在这里加"等帧 fence"
+	// 所以没问题；D-4 起这里先做 vkDeviceWaitIdle 保证安全。热路径若需回收，应升级为 timeline 延迟回收
 	// 或改用 VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT + 双缓冲。
 	void releaseMaterialSet(uint32_t index);
 
@@ -104,7 +111,7 @@ private:
 	VkDescriptorSetLayout globalSetLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout materialSetLayout = VK_NULL_HANDLE;
 
-	VkDescriptorSet globalSet = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> globalSets;
 
 	// D-3：材质只剩这一个 set，里面是 4 个纹理数组。
 	// 数组长度（材质容量）在分配时通过 variable descriptor count 指定，

@@ -5,10 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
-set(MY_VULKAN_DIR "D:/work/vulkan") 
-set(Vulkan_INCLUDE_DIR "${MY_VULKAN_DIR}/Include")
-set(Vulkan_LIBRARY "${MY_VULKAN_DIR}/Lib/vulkan-1.lib")
-
+# Vulkan SDK 通过 find_package 定位，不把某一台机器的安装路径写死。
+# 如果 CMake 找不到，可设置环境变量 VULKAN_SDK，或传 -DVulkan_ROOT=<SDK 根目录>。
 find_package(Vulkan REQUIRED)
 
 set(GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/glfw")
@@ -21,7 +19,25 @@ set(TINYGLTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tinygltf")
 set(ENTT_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/entt")
 set(SPDLOG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/spdlog")
 
-find_package(glfw3 REQUIRED)
+# tinygltf 是当前唯一必须存在、但体积较大且不进版本库的依赖。
+# 提前给出可执行的修复命令，比在编译期报 "cannot open tiny_gltf.h" 清楚。
+if(NOT EXISTS "${TINYGLTF_DIR}/tiny_gltf.h" OR NOT EXISTS "${TINYGLTF_DIR}/json.hpp")
+    message(FATAL_ERROR
+        "缺少 tinygltf/json.hpp。请执行：\n"
+        "  git clone --depth 1 https://github.com/syoyo/tinygltf.git \"${TINYGLTF_DIR}\"")
+endif()
+
+# GLFW：优先使用 3rdParty/glfw 自带源码，避免依赖机器上是否安装过 glfw3。
+# 如果以后把 3rdParty/glfw 换成系统包，也仍然保留 find_package 回退路径。
+if(EXISTS "${GLFW_DIR}/CMakeLists.txt")
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${GLFW_DIR}" "${CMAKE_BINARY_DIR}/glfw")
+else()
+    find_package(glfw3 REQUIRED)
+endif()
 set(GLM_INCLUDE_DIR "${GLM_DIR}")
 
 file(GLOB_RECURSE SOURCES "src/*.cpp")
@@ -107,7 +123,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
 )
 
-set(GLSL_VALIDATOR "D:/work/vulkan/Bin/glslangValidator.exe")
+# shader 编译器同样由 Vulkan SDK 的 CMake 包给出，避免第二处硬编码路径。
+set(GLSL_VALIDATOR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}")
+if(NOT GLSL_VALIDATOR OR NOT EXISTS "${GLSL_VALIDATOR}")
+    find_program(GLSL_VALIDATOR NAMES glslangValidator glslangValidator.exe)
+endif()
+if(NOT GLSL_VALIDATOR)
+    message(FATAL_ERROR "找不到 glslangValidator。请安装 Vulkan SDK，或传 -DGLSL_VALIDATOR=<路径>。")
+endif()
+
 set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(OUTPUT_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 

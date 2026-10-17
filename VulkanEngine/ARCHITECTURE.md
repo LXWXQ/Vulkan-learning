@@ -24,7 +24,7 @@
 | 数学 | GLM | 只有 `Camera` 手写了透视矩阵（因为 GLM 默认不是"Y 翻转 + 深度 0..1"的 Vulkan 约定），其余全用 GLM。 |
 | 窗口 | GLFW | `GLFW_NO_API` + `glfwCreateWindowSurface`，不引入 GLFW 的图形上下文。 |
 | 调试 UI | Dear ImGui 1.92.6（Vulkan + GLFW 后端） | 运行时可调（SSAO / 曝光 / Bloom / 相机），并显示遥测。**注意 1.92.6 的动态渲染字段位置**（见 AI_Readme 坑 3）。 |
-| Shader 工具 | glslangValidator（GLSL 450 → SPIR-V） | CMake PRE_BUILD 阶段自动编译，源文件改动即重编，不需要手写构建脚本。`.comp` 也已经在 glob 里，D-5 不用改构建。 |
+| Shader 工具 | glslangValidator（GLSL 450 → SPIR-V） | CMake PRE_BUILD 阶段自动编译，源文件改动即重编，不需要手写构建脚本。`.comp` 也已经在 glob 里，D-5 的 compute shader 直接复用这条构建路径。 |
 | 呈现模式 | `VK_PRESENT_MODE_IMMEDIATE_KHR` | 无垂直同步，跑分/延迟友好；代价是可能撕裂（开发阶段可接受）。 |
 | 分辨率 | 硬编码 1920×1080、窗口不可缩放 | 缩放要牵扯"所有 Pass 的中间目标重建 + 所有管线重建 + 管线里的固定 viewport/scissor"（虽然 viewport 已是动态状态，但 `PipelineConfigInfo` 里的尺寸仍被烘焙进 viewport 初值）。在渲染图还不能自动重建资源之前，先不做。 |
 
@@ -54,6 +54,7 @@ VulkanEngine/
     │   ├── Application.h/.cpp        # FirstApp：构造顺序 + 帧循环
     │   ├── Descriptor.h/.cpp         # 【死代码】DescriptorAllocator/Builder
     │   ├── DescriptorManager.h/.cpp  # Set 0 全局 + Set 1 材质槽位
+    │   ├── FrameInFlight.h          # kFramesInFlight（当前 2）
     │   ├── FrameInfo.h               # 每帧数据总线 + std140 静态断言
     │   ├── ImGuiSystem.h/.cpp        # 两段式 UI（prepare / render）
     │   ├── Material.h                # PBR 材质 + 兜底纹理
@@ -76,7 +77,7 @@ VulkanEngine/
     │   ├── RenderGraph.h/.cpp        # 线性渲染图
     │   ├── Device.h/.cpp             # 实例/设备/队列/VMA/验证层
     │   ├── Swapchain.h/.cpp
-    │   ├── Renderer.h/.cpp           # 帧生命周期（单缓冲）
+    │   ├── Renderer.h/.cpp           # 帧生命周期（2 帧在飞 + graphics/compute 双 timeline）
     │   ├── GBuffer.h/.cpp            # 5 附件 + 格式常量
     │   ├── Pipeline.h/.cpp           # 图形管线（动态渲染）
     │   ├── Texture.h/.cpp
@@ -501,28 +502,44 @@ p.transitionTo(handle, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 - **帧内同步**（image 布局、stage/access 屏障）→ 渲染图
 - **帧间同步**（fence、semaphore、交换链图像可用性）→ `Renderer`
 
-### 6.6 帧间同步（现状与代价）
+### 6.6 帧间同步（D-4）
 
-`Renderer` 目前是**单缓冲**：
+`Renderer` 现在是 **2 帧在飞**：
 
 ```
-1 个 VkCommandBuffer
-1 个 VkFence（inFlightFence，初值 signaled）
-2 个 VkSemaphore（imageAvailable / renderFinished）
+2 个 VkCommandBuffer                    // 每个 frame slot 一条
+1 个 timeline VkSemaphore               // frame slot 完成值
+2 个 imageAvailable VkSemaphore         // 每个 frame slot 一枚
+N 个 renderFinished VkSemaphore         // 每个交换链图像一枚
 ```
 
-`beginFrame()`：`vkWaitForFences`（等上一帧彻底结束）→ `vkResetFences` → `vkAcquireNextImageKHR` → `vkResetCommandBuffer` + `vkBeginCommandBuffer`。
-`endFrame()`：`vkEndCommandBuffer` → `vkQueueSubmit`（wait = imageAvailable，stage = `COLOR_ATTACHMENT_OUTPUT`；signal = renderFinished）→ `vkQueuePresentKHR`。
+`beginFrame()`：
+1. 用 `vkWaitSemaphores(timeline, submissionValues[slot])` 等这个 slot 上一轮完成；
+2. `vkAcquireNextImageKHR(imageAvailable[slot])`；
+3. reset / begin 该 slot 的命令缓冲。
 
-**代价**：CPU 和 GPU 完全不重叠 —— 每帧 CPU 提交完就阻塞在下一帧的 `vkWaitForFences` 上。这就是 D-4 要解决的事。
+`endFrame()`：
+1. 提交时 wait `imageAvailable[slot]`；
+2. signal `renderFinished[imageIndex]` 与 timeline 的本帧数值；
+3. `vkQueuePresentKHR` 只等 `renderFinished[imageIndex]`。
 
-**改成 N 帧在飞会连带改动**：
-- `Renderer` 要变成 per-frame-in-flight 的命令缓冲 + fence（semaphore 仍按交换链图像管理）；
-- **全局 UBO 必须变成每帧一份**（现在是单个 buffer + 单个持久映射指针，下一帧 `memcpy` 会覆盖 GPU 正在读的数据）；
-- `FrameInfo` 要带 `frameInFlightIndex`（现在是交换链 `imageIndex`，两者语义不同）；
-- `ImGuiSystem` 的 `MinImageCount` 要跟着对齐。
+**为什么瞬时资源也必须每帧一份**：GPU 执行第 N 帧时 CPU 已经在录制第 N+1 帧；G-Buffer、SSAO、HDR、Bloom 金字塔若共用，会让第 N+1 帧覆盖第 N 帧仍被采样的内容。这个 hazard 验证层不一定能完整报出来，所以 D-4 把它们全部按 frame slot 复制。
 
-**一个必须保留的细节**：`pWaitDstStageMask` 用 `COLOR_ATTACHMENT_OUTPUT` 而不是 `TOP_OF_PIPE` —— 前者让 `vkAcquireNextImageKHR` 的等待只卡住颜色输出阶段，顶点/几何/传输阶段可以和"图像还没拿到"这件事重叠。改成 `TOP_OF_PIPE` 是常见的性能陷阱。
+**必须保留的细节**：`pWaitDstStageMask` 仍用 `COLOR_ATTACHMENT_OUTPUT`，让 acquire 等待只卡颜色输出阶段；改成 `TOP_OF_PIPE` 会损失顶点/传输阶段的并行。
+### 6.7 异步 Compute（D-5）
+
+- 设备优先选择独立 compute queue family，没有独立队列时回退 graphics family。
+- `Renderer` 每帧同时录制 graphics command buffer 与 compute command buffer；
+  两条队列各自信号一枚 timeline semaphore，CPU 复用 frame slot 前同时等待两者。
+- `RenderGraph` 新增 `BufferHandle`、`createBuffer/importBuffer`、`readBuffer/writeBuffer`。
+  Buffer hazard 由 `VkBufferMemoryBarrier2` 推导，buffer 也纳入语义校验。
+- `ComputePipeline` 只创建 `VK_PIPELINE_BIND_POINT_COMPUTE` 管线。
+- `ComputeProbePass` 是验收探针：GPU 生成 1024 个 uint，再做 checksum 到 host-visible
+  buffer，下一轮 CPU 读回验证，证明 compute 提交、buffer barrier、host readback 都工作。
+
+> 当前限制：compute 与 graphics 之间如果存在 producer/consumer 资源依赖，RenderGraph 会抛异常。
+> 真正的 GPU culling / 体素生成接入时，需要补跨队列 ownership transfer 与 semaphore 调度。
+
 
 ---
 
@@ -837,11 +854,11 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
 
 | # | 薄弱点 | 影响 | 建议时机 |
 |---|--------|------|---------|
-| 1 | `Renderer` 单缓冲 + 单份 UBO | CPU/GPU 完全不重叠；且改成多帧并行时 UBO 必须一起改，否则数据竞争 | D-4 前 |
-| 2 | 窗口不可缩放 | 阻塞动态分辨率 / 超采样 / LOD | 与 D-4 合并做 |
+| 1 | ~~`Renderer` 单缓冲 + 单份 UBO~~ → **D-4 已修**：2 帧在飞，命令缓冲 / timeline / UBO / 瞬时图 / 描述符集均按 frame slot 隔离 | ✅ 已完成 |
+| 2 | 窗口不可缩放 | 阻塞动态分辨率 / 超采样 / LOD | D-4 后单独安排 |
 | 3 | 材质槽位没有真正的回收调用方 | `releaseMaterialSet()` 是死 API；场景反复加载会慢慢吃满 256 槽 | D-3 前 |
-| 4 | 渲染图不支持 buffer，compute 路径只有骨架（`isCompute` 从未被读取） | D-5 无法落地 | D-5 时补 |
-| 5 | ~~瞬时图"必须每帧都有人写"只靠人工检查~~ → **W2 已加机器校验**；仍剩一点：校验只覆盖"图"，覆盖不到"buffer"和"单个 mip/层" | 加了新资源类型时可能有盲区 | D-5 补 buffer 时一并扩展 |
+| 4 | ~~渲染图不支持 buffer，compute 路径只有骨架~~ → **D-5 已支持 storage buffer、compute command buffer 与异步 compute queue**；跨队列 producer/consumer 调度仍待补 | GPU culling / 体素任务接入前处理跨队列依赖 |
+| 5 | ~~瞬时资源"必须每帧都有人写"~~ → W2 覆盖 image，**D-5 已扩展到 buffer**；单个 mip/层仍未细分 | mip/层独立读写时可能有盲区 | 有需求时补 |
 | 6 | glTF 几何烘焙到世界空间，丢失节点层级 | 阻塞动态物体 / 实例化 | D-7 时重构 |
 | 7 | `LightingPass` 兼任"导入交换链" | Pass 职责不对称，init 顺序有隐式依赖 | 清理类 |
 | 8 | 遗留代码：`Descriptor.h/.cpp`（**有意保留**，文件头已注明）、`light_cube.*`、`shader.*`、`Swapchain` 的 depth/Framebuffer、`IBLBaker` 的 RenderPass/Framebuffer 残留 | 增加阅读成本 | 清理类 |
@@ -850,7 +867,7 @@ spdlog 已经拉进 3rdParty 并配了 include 路径，但一行都没用。
 | 11 | **"关闭 Bloom"仍有 7 个全屏 Pass 的固定开销**（W2 引入） | 关掉 Bloom 并不省 GPU；在低端卡/移动端会显得"关了没变快" | Bloom 变重时改两套描述符绑定 |
 | 12 | 验证脚本的两个前提（正常关窗 / 窗口在前台）没有自动化保护 | 脚本在 `%TEMP%` 下、不在版本库；换机器要重写，写错就会得到"看着正常其实无效"的结论 | 把脚本迁进仓库 |
 | 13 | bindless 的 `normalMaps` 数组绑了但没采样（D-3） | 每个材质白占 1/4 的描述符与一次更新；256 材质 = 256 个无用描述符 | 启用切线空间法线贴图时 |
-| 14 | **运行期复用材质槽位会改写 GPU 可能正在读的数组项，且无防护**（D-3） | 将来在加载新场景时分配材质，会以"随机贴图错乱"的形式暴露，而不是明确报错 | 需要运行期动态材质时（加帧 fence 或 UPDATE_AFTER_BIND） |
+| 14 | ~~运行期复用材质槽位会改写 GPU 可能正在读的数组项~~ → **D-4 已修**：归还前 `vkDeviceWaitIdle`。若回收进热路径再改成 timeline 延迟回收 | 性能优化时再升级 |
 
 > 曾经排在第 8 位的「`FirstApp` 析构顺序」已经在 W1 修掉（`25ae42f`），
 > 而且它比看上去严重：`renderPipeline` 是值成员、声明得比 `vulkanDevice` 晚，

@@ -32,27 +32,31 @@ void PresentPass::init()
     if (vkCreateSampler(device.getDevice(), &si, nullptr, &sampler) != VK_SUCCESS)
         throw std::runtime_error("PresentPass: 采样器创建失败");
 
-    set = descriptorManager->allocateSet(setLayout);
-
+    // D-4：每个 frame slot 一套输入描述符集，分别指向该帧的 HDR / Bloom 结果。
     // 两张输入纹理都由渲染图持有，VkImageView 在运行期不会重建，写一次即可。
-    // 注意 Bloom 关闭时 bloomResult 仍然是一张合法图像（只是内容是 0），
-    // 所以这里不需要为了"关闭状态"准备别的描述符集 —— 关闭与否由 push constant 决定。
-    VkDescriptorImageInfo infos[2] = {
-        { sampler, renderGraph.getView(resources.hdrScene), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-        { sampler, renderGraph.getView(resources.bloomResult), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
-    };
-
-    VkWriteDescriptorSet writes[2]{};
-    for (uint32_t i = 0; i < 2; ++i)
+    // Bloom 关闭时 bloomResult 仍然是一张合法图像（只是内容是 0），
+    // 所以不需要为了"关闭状态"准备别的描述符集 —— 关闭与否由 push constant 决定。
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
     {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[i].descriptorCount = 1;
-        writes[i].pImageInfo = &infos[i];
+        sets[frame] = descriptorManager->allocateSet(setLayout);
+
+        VkDescriptorImageInfo infos[2] = {
+            { sampler, renderGraph.getView(resources.hdrScene[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { sampler, renderGraph.getView(resources.bloomResult[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        };
+
+        VkWriteDescriptorSet writes[2]{};
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = sets[frame];
+            writes[i].dstBinding = i;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].descriptorCount = 1;
+            writes[i].pImageInfo = &infos[i];
+        }
+        vkUpdateDescriptorSets(device.getDevice(), 2, writes, 0, nullptr);
     }
-    vkUpdateDescriptorSets(device.getDevice(), 2, writes, 0, nullptr);
 
     // 光照通道之外的人（例如以后接自动曝光）可以复用这个采样器去读 HDR 中间目标
     resources.hdrSampler = sampler;
@@ -112,9 +116,10 @@ void PresentPass::createPipeline()
 
 void PresentPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
 {
+    const uint32_t frame = frameInfo.frameInFlightIndex;
     auto& pass = graph.addGraphicsPass("Present");
 
-    pass.read(resources.hdrScene);
+    pass.read(resources.hdrScene[frame]);
 
     // bloomResult 必须无条件声明读 —— 不能因为"Bloom 关了"就省掉。
     //
@@ -127,11 +132,11 @@ void PresentPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     // 所以"关闭 Bloom"不是靠这里不读，而是靠 BloomPass 把亮部提取的强度
     // 置零（输出全黑）+ 这里 bloomIntensity 传 0。两张图每帧都有人写、
     // 布局永远正确，语义校验也就永远成立。
-    pass.read(resources.bloomResult);
+    pass.read(resources.bloomResult[frame]);
 
     // 本帧的交换链图像。loadOp 用 DONT_CARE：整屏都会被全屏三角形覆盖，
     // 读回旧内容是纯粹的带宽浪费。
-    pass.writeColor(resources.swapchainImages[frameInfo.frameIndex],
+    pass.writeColor(resources.swapchainImages[frameInfo.swapchainImageIndex],
         VK_ATTACHMENT_LOAD_OP_DONT_CARE);
 
     PresentPush push{};
@@ -139,11 +144,11 @@ void PresentPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     push.bloomIntensity = frameInfo.settings.bloomIntensity;
     push.bloomEnabled = frameInfo.settings.bloomEnabled ? 1.0f : 0.0f;
 
-    pass.execute([this, push](VkCommandBuffer cmd)
+    pass.execute([this, push, frame](VkCommandBuffer cmd)
     {
         pipeline->bind(cmd);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-            0, 1, &set, 0, nullptr);
+            0, 1, &sets[frame], 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
