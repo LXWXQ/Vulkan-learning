@@ -1,9 +1,11 @@
 #include "src/Core/Application.h"
 #include "src/Core/JobSystem.h"
+#include "src/Core/Diagnostics.h"
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 #include <string>
+#include <sstream>
 
 // ---------------------------------------------------------------------------
 // 命令行参数
@@ -18,7 +20,18 @@
 //   --subresource-error-test      期望 RenderGraph 拒绝 mip0 写、mip1 读
 //   --compute-test                启用 D-5 compute probe 独立回归（默认关闭）
 //   --config-test                 EngineConfig 版本迁移 / 损坏配置保护自检
+//   --diagnostics-test [path]     诊断管线自检（合成消息 -> 计数 + JSONL 落盘）
+//   --device-fault-test           VK_EXT_device_fault 自检（健康设备上查询应成功）
+//   --screenshot <path>           目标帧截图写 PNG（+ --screenshot-frame <n>）
+//   --capture-frame <n>           RenderDoc 在第 n 帧抓帧（需注入 RenderDoc）
 //   --render-scale <0.25..1.0>    动态分辨率初始倍率（需配合 --selftest）
+//
+//   ---- P0：调试 / 剖析能力（随用随开，默认关闭）----
+//   --build-info                  打印本二进制编译进的 & 本次开启的调试能力后退出
+//   --gpu-timing                  每 pass GPU 计时，退出时写 gpu_timing.csv
+//   --gpu-timing-csv <path>       指定 CSV 路径（隐含 --gpu-timing）
+//   --validation-features <list>  启用验证层增强：bp(=best practices) / sync(=同步校验)，逗号分隔或 all
+//   --validation-jsonl <path>     把验证层消息写成 JSONL（默认不落盘，也不写 stderr）
 //
 // 为什么需要自检开关：
 //   "关掉某个 Pass"是最容易漏验证层错误的分支 —— 中间目标整帧没人写
@@ -27,6 +40,10 @@
 //   命令行参数，让这些分支也能进"验证层 0 字节"的回归检查。
 //
 // 这两个开关走的是和 UI 复选框完全相同的代码路径（EngineSettings）。
+//
+// 调试能力的开关模型（见 DEBUG_PROFILE_PLAN.md §1.5）：
+//   是否"编译进来"由 CMake option -> SENTINEL_ENABLE_* 宏决定；
+//   是否"本次开启"由上面的 flag 决定。关闭时不分配、不插命令、不落盘。
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
@@ -48,8 +65,13 @@ int main(int argc, char** argv)
     bool subresourceErrorTest = false;
     bool computeTest = false;
     bool configTest = false;
+    bool deviceFaultTest = false;
+    bool diagTest = false;
+    std::string diagTestPath;
     float renderScale = 1.0f;
     int  selfTestFrames = 600;
+
+    diag::Options diagOptions;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -73,17 +95,74 @@ int main(int argc, char** argv)
         else if (arg == "--subresource-error-test") subresourceErrorTest = true;
         else if (arg == "--compute-test") computeTest = true;
         else if (arg == "--config-test") configTest = true;
+        else if (arg == "--device-fault-test") deviceFaultTest = true;
+        else if (arg == "--diagnostics-test")
+        {
+            diagTest = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') diagTestPath = argv[++i];
+        }
         else if (arg == "--render-scale" && i + 1 < argc)
         {
             try { renderScale = std::stof(argv[++i]); }
             catch (...) { /* keep default */ }
         }
+        else if (arg == "--build-info") diagOptions.printBuildInfo = true;
+        else if (arg == "--gpu-timing") diagOptions.gpuTiming = true;
+        else if (arg == "--gpu-timing-csv" && i + 1 < argc)
+        {
+            diagOptions.gpuTimingCsvPath = argv[++i];
+            diagOptions.gpuTiming = true;
+        }
+        else if (arg == "--screenshot" && i + 1 < argc)
+        {
+            diagOptions.screenshot = true;
+            diagOptions.screenshotPath = argv[++i];
+        }
+        else if (arg == "--capture-frame" && i + 1 < argc)
+        {
+            try { diagOptions.captureFrame = std::stoi(argv[++i]); } catch (...) {}
+        }
+        else if (arg == "--screenshot-frame" && i + 1 < argc)
+        {
+            try { diagOptions.screenshotFrame = std::stoi(argv[++i]); } catch (...) {}
+            diagOptions.screenshot = true;
+        }
+        else if (arg == "--validation-jsonl" && i + 1 < argc)
+        {
+            diagOptions.validationJsonlPath = argv[++i];
+        }
+        else if (arg == "--validation-features" && i + 1 < argc)
+        {
+            std::stringstream ss(argv[++i]);
+            std::string token;
+            while (std::getline(ss, token, ','))
+            {
+                if (token == "bp" || token == "best-practices" || token == "all")
+                    diagOptions.validationBestPractices = true;
+                if (token == "sync" || token == "synchronization" || token == "syncval" || token == "all")
+                    diagOptions.validationSync = true;
+                if (token == "printf" || token == "debug-printf" || token == "all")
+                    diagOptions.validationDebugPrintf = true;
+                if (token == "gpuav" || token == "gpu-assisted")   // 单独指定：GPU-AV 较重且与 bindless 有兼容性风险，不并入 all
+                    diagOptions.validationGpuAssisted = true;
+            }
+        }
     }
 
     try
     {
+        // --build-info：不需要 Vulkan / 窗口，直接打印能力清单后退出。
+        if (diagOptions.printBuildInfo)
+        {
+            diag::printBuildInfo(diagOptions);
+            return EXIT_SUCCESS;
+        }
+
         if (configTest)
             return EngineConfig::selfTest() ? EXIT_SUCCESS : EXIT_FAILURE;
+
+        if (diagTest)
+            return diag::selfTest(diagTestPath) ? EXIT_SUCCESS : EXIT_FAILURE;
 
         if (jobTest)
         {
@@ -91,7 +170,9 @@ int main(int argc, char** argv)
             return jobSystem.selfTest() ? EXIT_SUCCESS : EXIT_FAILURE;
         }
 
-        FirstApp app;
+        diag::configureValidationLog(diagOptions.validationJsonlPath);
+
+        FirstApp app(diagOptions);
 
         if (noBloom) app.setBloomEnabled(false);
         if (noSSAO) app.setSSAOEnabled(false);
@@ -101,6 +182,9 @@ int main(int argc, char** argv)
         if (subresourceTest) app.setSubresourceTestEnabled(true);
         if (computeTest) app.setComputeProbeEnabled(true);
         app.setRenderScale(renderScale);
+
+        if (deviceFaultTest)
+            return app.runDeviceFaultSelfTest();
 
         if (subresourceErrorTest)
             return app.runSubresourceErrorSelfTest();

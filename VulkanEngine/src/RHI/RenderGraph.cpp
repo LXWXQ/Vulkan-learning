@@ -1,3 +1,4 @@
+#include "GpuProfiler.h"
 #include "RHI/RenderGraph.h"
 #include "RHI/CommandUtils.h"
 
@@ -99,11 +100,22 @@ RenderGraph::BufferRange RenderGraph::normalizeBufferRange(
 }
 
 void RenderGraph::beginFrame(VkCommandBuffer graphicsCommandBuffer,
-                             VkCommandBuffer computeCommandBuffer)
+                             VkCommandBuffer computeCommandBuffer,
+                             uint32_t frameSlot,
+                             uint64_t frameNumber)
 {
     cmd = graphicsCommandBuffer;
     computeCmd = computeCommandBuffer;
     crossQueueDependencies = {};
+    currentFrameSlot = frameSlot;
+
+    // P0-4：GPU 计时。关闭时 gpuTimer 为 nullptr，一个分支都不进。
+#ifdef SENTINEL_ENABLE_GPU_TIMING
+    if (gpuTimer && cmd != VK_NULL_HANDLE)
+        gpuTimer->onFrameBegin(cmd, frameSlot, frameNumber);
+#else
+    (void)frameNumber;
+#endif
 
     for (std::unique_ptr<Pass>& p : passes)
         p.reset();
@@ -148,12 +160,19 @@ void RenderGraph::endFrame()
     // 而不是让画面先花一帧。
     validateWriteCoverage();
 
+    // P0-4：只对 graphics pass 计时；compute 队列的时间戳另算。
+    uint32_t timedPassIndex = 0;
+
     for (std::unique_ptr<Pass>& passPtr : passes)
     {
         Pass& pass = *passPtr;
         if (!pass.enabled) continue;
 
         const VkCommandBuffer passCmd = pass.isCompute ? computeCmd : cmd;
+
+        // P0-4：本 pass 的 GPU 计时开始（仅 graphics）。
+        if (!pass.isCompute)
+            onPassTimingBegin(passCmd, timedPassIndex, pass.name.c_str());
 
         // ---- 0) 同一个 Pass 里对同一张图可能声明了多次访问 ----
         // 典型是 Bloom 的上采样：它既要把粗级结果当纹理采样，
@@ -255,6 +274,11 @@ void RenderGraph::endFrame()
         if (pass.isCompute && (!pass.colors.empty() || !pass.depths.empty()))
             throw std::runtime_error("RenderGraph: compute pass \"" + pass.name + "\" 不能声明颜色/深度附件");
 
+        // P1-1：Tracy GPU zone 覆盖本 pass 的屏障 + 渲染 + 回调。
+        // active=false（compute pass 或未启用）时是空操作。
+        {
+            SENTINEL_GPU_ZONE_SCOPE(gpuProfiler, passCmd, pass.name.c_str(), !pass.isCompute);
+
         // ---- 1) 资源屏障：由声明自动推导 ----
         for (const Access& acc : accesses)
             emitBarrierIfNeeded(acc, passCmd, pass.isCompute);
@@ -322,6 +346,14 @@ void RenderGraph::endFrame()
         // ---- 4) 结束动态渲染 ----
         if (raster)
             vkCmdEndRendering(passCmd);
+
+        // P0-4：本 pass 的 GPU 计时结束。
+        if (!pass.isCompute)
+        {
+            onPassTimingEnd(passCmd, timedPassIndex);
+            ++timedPassIndex;
+        }
+        }   // P1-1：结束本 pass 的 GPU zone 作用域
 
         // ---- 5) 记录本 Pass 造成的最终状态，供下一个 Pass 推导屏障 ----
         for (const Access& acc : accesses)
@@ -1078,9 +1110,15 @@ RenderGraph::Pass& RenderGraph::Pass::writeColor(TextureHandle t, VkAttachmentLo
     ca.clearValue = clear;
     colors.push_back(ca);
 
+    // LOAD_OP_LOAD 会读取附件原有内容：除了写，还必须声明读，
+    // 否则屏障的 dstAccessMask 只覆盖写，同步校验会报 SYNC-HAZARD-READ_AFTER_WRITE。
+    VkAccessFlags2 colorAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    if (loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
+        colorAccess |= VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+
     accesses.push_back(Access{ t, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, range });
+                               colorAccess, range });
     return *this;
 }
 
@@ -1099,8 +1137,13 @@ RenderGraph::Pass& RenderGraph::Pass::writeDepth(TextureHandle t, VkAttachmentLo
     da.clearValue = clear;
     depths.push_back(da);
 
+    // 同上：LOAD 语义下深度附件也会被读取。
+    VkAccessFlags2 depthAccess = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
+        depthAccess |= VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+
     accesses.push_back(Access{ t, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, range });
+                               depthAccess, range });
     return *this;
 }

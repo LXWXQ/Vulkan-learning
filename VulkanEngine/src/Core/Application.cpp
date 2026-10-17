@@ -12,12 +12,16 @@
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
+#include "Core/Profiler.h"
+#include "RHI/GpuProfiler.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-FirstApp::FirstApp()
+FirstApp::FirstApp(const diag::Options& options)
 {
+	diagnosticsOptions = options;
+
 	// W1：配置必须在最前面读 —— 窗口标题就是配置里的一项，而窗口在
 	// initWindow() 里创建，之后再改标题会让用户看到一次闪动。
 	// 这里先读进一个局部对象，等 Scene 就绪后再整体搬过去。
@@ -33,7 +37,7 @@ FirstApp::FirstApp()
 	jobSystem = std::make_unique<JobSystem>();
 
 	initWindow(loadedSettings.windowTitle);
-	vulkanDevice = std::make_unique<Device>(window);
+	vulkanDevice = std::make_unique<Device>(window, diagnosticsOptions);
 
 	// 请求尺寸只是期望值。surface 可能因为标题栏/任务栏把它裁小，
 	// 交换链创建时会采用 surface 的 currentExtent；渲染资源必须跟着实际尺寸走。
@@ -42,6 +46,18 @@ FirstApp::FirstApp()
 	const VkExtent2D renderExtent = vulkanSwapchain->getSwapChainExtent();
 	currentRenderExtent = renderExtent;
 	renderer = std::make_unique<Renderer>(*vulkanDevice, *vulkanSwapchain);
+
+	// P1-4：无头截图（编译期或运行期任一关闭时 init 直接返回，不创建任何资源）。
+	screenshotCapture.init(vulkanDevice->getDevice(), vulkanDevice->getVmaAllocator(),
+		vulkanSwapchain->getSwapChainImageFormat(), vulkanSwapchain->getSwapChainExtent(),
+		diagnosticsOptions.screenshot);
+	if (screenshotCapture.isEnabled() && diagnosticsOptions.screenshotFrame >= 0)
+		screenshotCapture.setTargetFrame(static_cast<uint64_t>(diagnosticsOptions.screenshotFrame));
+	else
+		screenshotAutoTarget = screenshotCapture.isEnabled();
+
+	// P1-2：RenderDoc 抓帧挂钩（编译期关闭或未注入时为空操作）。
+	renderDoc.init(diagnosticsOptions.captureFrame > 0, diagnosticsOptions.captureFrame);
 
 	// D-4：每个 frame slot 一套 G-Buffer。两帧同时在飞时共享一套会跨帧读写冲突。
 	std::array<GBuffer*, kFramesInFlight> gBufferPtrs{};
@@ -53,6 +69,25 @@ FirstApp::FirstApp()
 
 	// D-1(b)：渲染图必须在各 Pass 之前创建 —— Pass 的 init() 会往里注册资源
 	renderGraph = std::make_unique<RenderGraph>(*vulkanDevice);
+
+	// P0-4：GPU 计时。编译期或运行期任一关闭时 init 直接返回，不创建任何资源。
+	gpuTimer.init(vulkanDevice->getDevice(), vulkanDevice->getPhysicalDevice(),
+		vulkanDevice->findPhysicalQueueFamilies().graphicsFamily.value(),
+		kFramesInFlight, diagnosticsOptions.gpuTiming);
+	renderGraph->setGpuTimer(&gpuTimer);
+
+	// P1-1：Tracy GPU 上下文（每 pass zone）。编译期关闭时不创建任何资源。
+	gpuProfiler.init(vulkanDevice->getPhysicalDevice(), vulkanDevice->getDevice(),
+		vulkanDevice->getGraphicsQueue(), renderer->getCommandPool(), true);
+	renderGraph->setGpuProfiler(&gpuProfiler);
+	if (diagnosticsOptions.gpuTiming)
+	{
+		if (gpuTimer.isEnabled())
+			std::cout << "[Diag] GPU timing enabled -> " << diagnosticsOptions.gpuTimingCsvPath
+			          << " (queries=" << gpuTimer.queryPoolCount() << ")\n";
+		else
+			std::cout << "[Diag] --gpu-timing not active (not compiled in or device lacks timestamps)\n";
+	}
 	renderResources = std::make_unique<RenderResources>();
 
 	// 注意顺序：Scene::init 里要加载 glTF，而 glTF 材质需要立刻分配描述符槽位，
@@ -193,6 +228,7 @@ FirstApp::~FirstApp()
 	// =====================================================================
 	vkDeviceWaitIdle(vulkanDevice->getDevice());
 
+	finalizeDiagnostics(); 
 	// W1：退出时保存。放在析构里而不是 run() 的循环之后，是因为自检和异常
 	// 退出也走析构，这样"改完参数直接关窗口"这条最常用的路径一定不会丢。
 	// 但自检模式要跳过：它会把 bloom/ssao 关掉，照常保存就污染了用户配置。
@@ -279,6 +315,26 @@ if (subresourceProbePassPtr != nullptr)
 subresourceProbePassPtr->setMode(enabled
 ? SubresourceProbePass::Mode::Positive
 : SubresourceProbePass::Mode::Disabled);
+}
+
+int FirstApp::runDeviceFaultSelfTest()
+{
+	suppressAutoSave = true;
+
+	// P2-4：注意 VUID-vkGetDeviceFaultInfoEXT-device-07336 —— 该扩展只能在设备
+	// "已 lost" 时调用，所以这里只校验"能力是否就绪"（扩展已启用 + 入口点已解析），
+	// 真正的查询放在 Renderer 检测到 VK_ERROR_DEVICE_LOST 的那条路径上。
+	const bool supported = vulkanDevice->isDeviceFaultSupported();
+	const bool entryPoint = vulkanDevice->hasDeviceFaultEntryPoint();
+	const bool ok = (supported == entryPoint);   // 要么都能用，要么都不支持
+
+	std::cout << "[DeviceFault] selfTest " << (ok ? "PASS" : "FAIL")
+	          << " | supported=" << (supported ? 1 : 0)
+	          << " entryPoint=" << (entryPoint ? 1 : 0)
+	          << " (query path reserved for lost-state)" << "\n";
+
+	vkDeviceWaitIdle(vulkanDevice->getDevice());
+	return ok ? 0 : 1;
 }
 
 int FirstApp::runSubresourceErrorSelfTest()
@@ -418,6 +474,7 @@ void FirstApp::recreateSwapchain(VkExtent2D framebufferExtent)
 
 	vulkanSwapchain->recreate(framebufferExtent);
 	renderer->onSwapchainRecreated();
+	screenshotCapture.onResize(vulkanSwapchain->getSwapChainExtent());
 
 	// ImGui's Vulkan backend caches image count and output format. Rebuild it
 	// only with the swapchain; dynamic resolution keeps the same backend.
@@ -558,6 +615,8 @@ std::cout << "[Sentinel] 材质就绪，描述符槽位占用 "
 
 void FirstApp::run()
 {
+	if (screenshotCapture.isEnabled() && screenshotAutoTarget)
+		screenshotCapture.setTargetFrame(60);   // 交互模式：预热后第 60 帧
 while (!glfwWindowShouldClose(window))
 {
 glfwPollEvents();
@@ -580,6 +639,7 @@ updateMsAccum += std::chrono::duration<double, std::milli>(updateEnd - updateSta
 renderMsAccum += std::chrono::duration<double, std::milli>(renderEnd - updateEnd).count();
 ++profiledFrames;
 
+		SENTINEL_PROFILE_FRAME_MARK(); 
 // 每 5 秒打一行性能摘要。
 // 除了日常观察，这在"无头验证"（重定向 stdout 跑一遍看验证层）时特别有用 ——
 // 没有它就无法区分"渲染正常"和"卡死在第一帧"。
@@ -669,6 +729,9 @@ int FirstApp::runHeadlessSelfTest(int frames)
 
 	materialStressBaselineUsed = descriptorManager->getMaterialSlotUsed();
 
+	if (screenshotCapture.isEnabled() && screenshotAutoTarget)
+		screenshotCapture.setTargetFrame(static_cast<uint64_t>(std::min(frames, 60)));
+
 	const auto benchmarkStart = std::chrono::high_resolution_clock::now();
 	const float dt = 1.0f / 60.0f;
 	for (int i = 0; i < frames; ++i)
@@ -700,6 +763,7 @@ int FirstApp::runHeadlessSelfTest(int frames)
 		}
 		update(dt);
 		render(dt);
+		SENTINEL_PROFILE_FRAME_MARK();
 	}
 
 	const auto benchmarkEnd = std::chrono::high_resolution_clock::now();
@@ -730,12 +794,13 @@ int FirstApp::runHeadlessSelfTest(int frames)
 			<< " capacity=" << descriptorManager->getMaterialSlotCapacity() << "\n";
 	}
 
-	std::cout << "[SelfTest] 完成 " << frames << " 帧，验证层输出见 stderr\n";
+	std::cout << "[SelfTest] 完成 " << frames << " 帧（验证层不再写 stderr；见 [Validation] 摘要 / --validation-jsonl）\n";
 	return 0;
 }
 
 void FirstApp::update(float dt)
 {
+	SENTINEL_ZONE_SCOPED("update");
 	imguiSystem->newFrame();
 
 	float aspect = vulkanSwapchain->getSwapChainExtent().width /
@@ -745,9 +810,14 @@ void FirstApp::update(float dt)
 
 void FirstApp::render(float dt)
 {
+	SENTINEL_ZONE_SCOPED("render");
 	if (auto commandBuffer = renderer->beginFrame())
 	{
 		scene->getTelemetry().reset();
+
+		// P1-2：到达目标帧时请求 RenderDoc 抓帧。
+		if (renderDoc.shouldCapture(renderer->getFrameNumber()))
+			renderDoc.triggerCapture();
 
 		// beginFrame 已确认本 frame slot 的上一轮 GPU 工作完成，可以安全覆写 UBO。
 		const uint32_t frameInFlight = renderer->getCurrentFrameInFlightIndex();
@@ -797,18 +867,70 @@ void FirstApp::render(float dt)
 
 		// D-1(b)：所有 Pass 把自己的工作声明进渲染图，
 		// 屏障、布局转换、vkCmdBeginRendering 全部由渲染图负责。
-		renderGraph->beginFrame(commandBuffer, renderer->getComputeCommandBuffer());
+	renderGraph->beginFrame(commandBuffer, renderer->getComputeCommandBuffer(), 		renderer->getCurrentFrameInFlightIndex(), renderer->getFrameNumber());
 		renderPipeline.registerAll(*renderGraph, frameInfo);
 		// 渲染完成 -> 把这张交换链图像转入 PRESENT_SRC_KHR 供 present
 		renderGraph->presentTransition(renderResources->swapchainImages[frameInfo.swapchainImageIndex]);
 		renderGraph->endFrame();
 
+		// P1-4：目标帧把交换链图像读回 staging buffer（present 之前）。
+		if (screenshotCapture.isTargetFrame(renderer->getFrameNumber()))
+			screenshotCapture.recordCopy(commandBuffer, vulkanSwapchain->getImage(frameInfo.swapchainImageIndex),
+				vulkanSwapchain->getSwapChainExtent());
+
 		const auto& crossQueue = renderGraph->getCrossQueueDependencies();
+		// P1-1：收集本帧的 Tracy GPU zone（必须在命令缓冲结束前）。
+		gpuProfiler.collect(commandBuffer);
 		renderer->endFrame(crossQueue.computeToGraphics, crossQueue.graphicsToCompute);
+		if (screenshotCapture.hasPendingCopy())
+		{
+			vkDeviceWaitIdle(vulkanDevice->getDevice());
+			screenshotCapture.writePng(diagnosticsOptions.screenshotPath);
+		}
 	}
 	else
 	{
 		// Acquire failed after update() already started an ImGui frame.
 		imguiSystem->discardFrame();
 	}
+}
+
+void FirstApp::finalizeDiagnostics()
+{
+    if (diagnosticsFinalized) return;
+    diagnosticsFinalized = true;
+
+    // 必须在 vkDeviceWaitIdle 之后调用：先读回最后几帧的 GPU 计时，再销毁
+    // query pool / staging buffer（此时 device 仍有效）。守卫用的状态必须在
+    // destroy() 之前取，否则会被清零而失去意义。
+    const bool gpuTimingWasEnabled = gpuTimer.isEnabled();
+    const bool screenshotWasEnabled = screenshotCapture.isEnabled();
+    const uint32_t gpuTimingQueries = gpuTimer.queryPoolCount();
+    const uint32_t screenshotBytes = screenshotCapture.stagedBytes();
+
+#ifdef SENTINEL_ENABLE_GPU_TIMING
+    if (gpuTimer.isEnabled())
+    {
+        gpuTimer.finalize();
+        if (gpuTimer.writeCsv(diagnosticsOptions.gpuTimingCsvPath))
+            std::cout << "[Diag] gpu_timing.csv written: " << diagnosticsOptions.gpuTimingCsvPath
+                      << " (" << gpuTimer.sampleCount() << " samples)\n";
+    }
+#endif
+    gpuTimer.destroy();
+    screenshotCapture.destroy();
+    renderDoc.destroy();
+    gpuProfiler.destroy();
+
+    diag::printValidationSummary();
+
+    // P0-6 零开销守卫：关闭时不应有任何调试用 GPU 资源 / 额外文件。
+    const bool anyDebugEnabled = gpuTimingWasEnabled || screenshotWasEnabled;
+    const bool guardOk = (gpuTimingQueries == 0 && screenshotBytes == 0);
+    std::cout << "[Diag] zero-overhead guard "
+              << (anyDebugEnabled ? "SKIP (debug capability on)" : (guardOk ? "PASS" : "FAIL"))
+              << " | queryPool=" << gpuTimingQueries
+              << " | screenshotBuffer=" << screenshotBytes
+              << " | validationJsonl=" << (diagnosticsOptions.validationJsonlPath.empty() ? "off" : "on")
+              << "\n";
 }

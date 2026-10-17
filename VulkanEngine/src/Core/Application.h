@@ -12,6 +12,10 @@
 #include "Render/IBLBaker.h"
 #include "Render/RenderResources.h"
 #include "RHI/RenderGraph.h"
+#include "RHI/GpuTimer.h"
+#include "RHI/ScreenshotCapture.h"
+#include "RHI/RenderDocHook.h"
+#include "RHI/GpuProfiler.h"
 #include "Scene/Scene.h"
 #include <memory>
 #include <chrono>
@@ -26,7 +30,7 @@ class SubresourceProbePass;
 class FirstApp
 {
 public:
-	FirstApp();
+	explicit FirstApp(const diag::Options& options);
 	~FirstApp();
 
 	FirstApp(const FirstApp&) = delete;
@@ -48,6 +52,7 @@ public:
 	void setSubresourceTestEnabled(bool enabled);
 	void setComputeProbeEnabled(bool enabled);
 	int  runSubresourceErrorSelfTest();
+	int  runDeviceFaultSelfTest();
 	// TD-03 dynamic-resolution interface: change intermediate render targets
 	// without recreating pipelines or the swapchain.
 	void setRenderScale(float scale);
@@ -73,6 +78,7 @@ private:
 	void rebuildGlobalDescriptors();
 	VkExtent2D getDesiredRenderExtent() const;
 	void materialStressStep();
+	void finalizeDiagnostics();
 
 	GLFWwindow* window = nullptr;
 	std::unique_ptr<Device> vulkanDevice;
@@ -94,6 +100,15 @@ private:
 
 	// D-1(b)：渲染图 + 帧内资源登记表
 	std::unique_ptr<RenderGraph> renderGraph;
+
+	// P0：诊断基础设施（随用随开）。
+	diag::Options diagnosticsOptions;
+	GpuTimer gpuTimer;
+	RenderDocHook renderDoc;
+	GpuProfiler gpuProfiler;
+	ScreenshotCapture screenshotCapture;
+	bool screenshotAutoTarget = false;
+	bool diagnosticsFinalized = false;
 	std::unique_ptr<RenderResources> renderResources;
 
 	std::array<VkBuffer, kFramesInFlight> globalUboBuffers{};

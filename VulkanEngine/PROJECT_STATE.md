@@ -13,8 +13,10 @@
 - 已实现：线性 RenderGraph、自动 barrier、子资源校验、bindless 材质、2 帧在飞、graphics/compute 双队列、IBL、EnTT ECS、JobSystem、窗口缩放、动态分辨率、版本化配置。
 - 技术债 TD-01 ~ TD-09 已全部完成。
 - 当前默认渲染路径**不再运行 compute probe**；只有 `--compute-test` 会启用。
+- **调试 / 剖析能力随用随开**：默认关闭，关闭后不影响运行时性能；明显拖慢渲染的调试代码绝不能留在默认路径（详见 `DEBUG_PROFILE_PLAN.md`）。
+- **P0 基础设施已落地**：`--build-info` / `--gpu-timing`(+CSV) / `--validation-features` / `--validation-jsonl` / `--diagnostics-test`；验证层回调不再写 stderr；`tools/Profile.ps1` 一键产出调试包。
 - 项目已清理：`build/`、`imgui.ini`、废弃 shader、源码目录 `.spv` 均已删除。
-- 最后一次完整验证：13 项测试全部通过，所有测试 stderr 为 0 字节。之后只做了文档和清理，建议下次先重跑一次验证确认环境。
+- 最后一次完整验证（2026-10-17，含 P0）：**16 项测试全部通过**，所有测试 stderr 为 0 字节。
 
 ## 1. 接手后的第一步
 
@@ -70,6 +72,7 @@ $env:VULKAN_SDK = "D:\work\vulkan"
 - `SubresourceRange`：按 mip/layer 独立跟踪 layout/stage/access。
 - `BufferRange`：按 offset/size 跟踪写覆盖。
 - graphics/compute 跨队列 producer-consumer 单向依赖推导与环检测。
+- **同步语义补全（2026-10-17）**：`writeColor`/`writeDepth` 在 `LOAD` 语义下补上读访问位（否则 syncval 报 `READ_AFTER_WRITE`）；graphics 等 `imageAvailable` 的阶段放宽到 `ALL_COMMANDS`（避免与 acquire 的 `WRITE_AFTER_READ`）。修复后 `--validation-features sync` 报 **0 errors / 0 warnings**。
 
 ### 3.2 多帧与队列
 
@@ -117,6 +120,26 @@ $env:VULKAN_SDK = "D:\work\vulkan"
 - 损坏 JSON、非法版本、未来版本都不覆盖原文件。
 - `save()` 对不可读的已有配置直接拒绝覆盖。
 
+### 3.8 调试与剖析基础设施（P0–P3）
+
+- **开关模型**：能力「随用随开」，默认关、关闭零开销。是否「编译进来」由 CMake 的 `SENTINEL_ENABLE_*` 选项决定；是否「本次开启」由命令行 flag 决定（详见 `DEBUG_PROFILE_PLAN.md` §1.5）。
+- **验证层回调不再写 stderr**：改为在 diag 模块累计 error/warning 计数，可选 JSONL 落盘（`--validation-jsonl`），退出时打印 `[Validation] errors=N warnings=M`。
+- **`--gpu-timing`**：每 pass `vkCmdWriteTimestamp2`（`VK_EXT_calibrated_timestamps` 的 `timestampPeriod`），退出写 `gpu_timing.csv`；关闭时不创建任何 query pool。
+- **`--validation-features bp,sync`**：可选启用验证层 best practices / 同步校验。
+- **`--build-info`**：自报「编译进的」与「本次开启的」能力清单。
+- **`--diagnostics-test`**：诊断管线自检（合成消息 -> 计数 + JSONL），不依赖 Vulkan。
+- **`tools/Profile.ps1`**：一次调用产出 `build/profiles/<timestamp>/`（`env.txt` + `gpu_timing.csv` + 运行日志 + `manifest.json`）。
+- **`--screenshot <path>`（P1-4）**：目标帧把交换链图像读回并写 PNG；`--screenshot-frame <n>` 指定帧。交换链图像在此模式下额外带 `TRANSFER_SRC` usage。
+- **`--capture-frame <n>`（P1-2）**：RenderDoc in-app 抓帧（未注入 RenderDoc 时为空操作）。
+- **Tracy 挂钩（P1-1）**：`src/Core/Profiler.h`（CPU zone/帧标记）+ `src/RHI/GpuProfiler.*`（每 pass GPU zone）+ RenderGraph 集成；`SENTINEL_ENABLE_TRACY=OFF`（默认）时全部展开为空。**ON 路径已验证**。
+- **`tools/Screenshot.ps1` / `tools/Capture.ps1`**：截图 + 金标准 diff；RenderDoc CLI 抓帧包装。
+- **P2-3 深度校验作业（厂商中立）**：`--validation-features gpuav` 接入 `VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT`；`tools/DeepValidation.ps1` 一次性跑 sync / bp / gpuav / printf，输出 `summary.json`，**不进默认回归**。
+- **P2-4 `VK_EXT_device_fault`**：设备支持时启用；`Renderer` 在 `VK_ERROR_DEVICE_LOST` 时调 `vkGetDeviceFaultInfoEXT` 输出 `[DeviceFault]` 故障信息；`--device-fault-test` 校验能力就绪。
+- **P3-2 基线 + diff（厂商中立）**：`tools/Baseline.ps1 -Action Save/Diff` 一次采集 GPU 时间 / 验证层 / 视觉三维度并自动判回归；剔除预热帧，阈值可配；`Validate.ps1` 末尾跑 `p3-baseline-diff` 自测。
+- **P3-1 一键证据包**：`tools/DebugBundle.ps1` 产出 `build/bundles/<ts>/`，含 `manifest.json` / `summary.md` / `build_info.txt` / `env.txt` / `run/` / `validation/` / `deep/` / `baseline_diff/`；每步记录状态，失败则退出码非 0。`Profile.ps1` 是其轻量版。
+
+---
+
 ## 4. 构建与运行
 
 ### 4.1 手动构建
@@ -146,6 +169,16 @@ cmake --build build --config Debug
 | `--subresource-error-test` | 故意写 mip0 后读 mip1，期望被拒绝 |
 | `--material-stress` | 反复分配/延迟归还材质槽位 |
 | `--config-test` | 配置迁移、备份、损坏文件保护自检 |
+| `--build-info` | 打印调试能力清单后退出（不创建窗口） |
+| `--gpu-timing` | 每 pass GPU 计时，退出写 `gpu_timing.csv` |
+| `--gpu-timing-csv <path>` | 指定 CSV 路径（隐含 `--gpu-timing`） |
+| `--validation-features bp,sync` | 启用验证层 best practices / 同步校验 |
+| `--validation-jsonl <path>` | 验证层消息写 JSONL（默认不落盘） |
+| `--diagnostics-test [path]` | 诊断管线自检（合成消息） |
+| `--screenshot <path>` | 目标帧截图写 PNG（+ `--screenshot-frame <n>`）|
+| `--capture-frame <n>` | RenderDoc 第 n 帧抓帧（需注入 RenderDoc）|
+| `--validation-features gpuav` | 启用 GPU-AV（着色器越界，独立于 all）|
+| `--device-fault-test` | `VK_EXT_device_fault` 能力自检 |
 
 ### 4.3 推荐的单项回归
 
@@ -160,11 +193,11 @@ cmake --build build --config Debug
 .\build\Debug\VulkanEngine.exe --selftest 60 --resize-test
 ```
 
-正常回归要求：退出码 0，stderr 0 字节。
+正常回归要求：退出码 0，stderr 0 字节；并额外要求 stdout 出现 `[Validation] errors=0 warnings=0`（所有会创建 Vulkan 设备的用例）。
 
 ## 5. 验证矩阵
 
-`tools/Validate.ps1` 当前覆盖 13 项：
+`tools/Validate.ps1` 默认跑 **18 项引擎用例** + 2 项工具级自测（`p3-baseline-diff`、`p3-debug-bundle`）；加 `-EnableProfiling` 时引擎用例 **19 项**：
 
 | 测试 | 目的 |
 |---|---|
@@ -178,6 +211,11 @@ cmake --build build --config Debug
 | `td04-material-slot-stress` | 150 轮材质槽位延迟回收 |
 | `td05-subresource-probe` | mip/layer + buffer 区间正向探针 |
 | `td05-subresource-error` | 子资源写覆盖反例 |
+| `p0-build-info` | `--build-info` 能力清单 |
+| `p0-diagnostics-selftest` | 诊断管线自检（合成消息 -> 计数 + JSONL） |
+| `p0-gpu-timing` | 每 pass GPU 计时 -> `gpu_timing.csv` |
+| `p1-screenshot` | 无头截图 -> PNG |
+| `p2-device-fault` | `VK_EXT_device_fault` 能力就绪自检 |
 
 最近一次实测性能摘要：
 
@@ -257,12 +295,21 @@ src/
    - 任何预期错误都应被测试捕获，不能让 `std::cerr` 污染 stderr。
    - 反例测试应在进程内捕获异常并输出 PASS 标记。
 
+8. **调试 / 剖析能力一律「随用随开」，关闭后不得影响运行时性能**
+   - 默认关闭；开启方式为正着命名的 CLI flag（如 `--gpu-timing`），或编译期宏 / CMake option。
+   - 关闭时不得做任何分配、不得往 command buffer 插命令、不得建 query pool / hook / 线程。
+   - 重量级或带外部依赖的能力（Tracy / RenderDoc hook / Debug Printf / GPU-AV）默认**编译期关闭**。
+   - 判据不是「绝对零开销」，而是**「明显影响渲染速度的绝对不能留」**：允许每帧每 pass 一处的提前判断，禁止任何可测量的渲染性能回退。
+   - 完整调研与阶段计划见 `DEBUG_PROFILE_PLAN.md`。
+
 ## 8. 已知限制
 
 - 跨队列资源当前使用 CONCURRENT sharing，尚未实现 EXCLUSIVE queue-family ownership transfer。
 - glTF 内部节点层级在导入时烘焙到世界空间，Sponza 内部节点不是独立动态 entity。
 - SpatialIndex 每帧重建，尚无 dirty / 增量更新。
 - 尚未实现阴影、SSR、自动曝光、动画、音频、编辑器。
+- Tracy / RenderDoc 依赖已由 `tools/SetupProfiling.ps1` 下载到 `3rdParty`，P1-1/P1-2 的 ON 路径已验证（`Validate.ps1 -EnableProfiling` 19 项全绿）；默认仍是编译期关闭。nsys/ncu 为厂商专用，已降级为可选补充（见 `DEBUG_PROFILE_PLAN.md` §3 G 组），未安装。
+- `VK_EXT_device_fault` 的查询**只能在设备已 lost 时调用**（VUID-07336），所以健康设备上只能校验能力就绪，真实故障路径由 Renderer 的 device-lost 分支覆盖。
 - ComputeProbe / CrossQueueProbe / SubresourceProbe 是测试探针，不是生产渲染任务。
 - `Resources/` 体积较大且不入库，需要单独准备；`3rdParty/` 由 setup 脚本准备。
 - 当前工作区没有 git 仓库，不能靠版本控制判断未提交改动。
@@ -303,6 +350,7 @@ src/
 | `FUTURE_PLAN.md` | 后续主功能路线与验收标准 |
 | `HANDOFF.md` | 更长的历史交接记录 |
 | `tools/README.md` | 依赖固定版本与验证脚本说明 |
+| `DEBUG_PROFILE_PLAN.md` | 调试 / 性能剖析工具链、阶段计划、零开销开关约定与 LLM 排障手册 |
 
 ## 11. 给下一个对话的直接提示
 
@@ -314,3 +362,6 @@ src/
 - 改 RenderGraph 时保留 mip/layer 与 buffer 区间语义校验。
 - 改 EngineConfig 时保留 version 2、迁移备份和损坏文件保护。
 - 任何新增测试仍以：退出码 0、stderr 0 字节、关键 stdout 标记为验收标准。
+- 引入任何调试 / 剖析工具前先读 `DEBUG_PROFILE_PLAN.md`：一律「随用随开」，关闭后不得影响运行时性能。
+- 新增 / 修改调试能力时保持「`SENTINEL_ENABLE_*` 编译期开关 + 命令行 flag」两层模型；`--build-info` 用于确认二进制实际编译进了什么。
+- Tracy / RenderDoc 默认编译期 OFF；启用走 `tools/SetupProfiling.ps1` + `-DSENTINEL_ENABLE_*=ON`；剖析构建回归用 `Validate.ps1 -EnableProfiling`。

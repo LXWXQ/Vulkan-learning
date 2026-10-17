@@ -812,6 +812,8 @@ void renderDrawData(VkCommandBuffer);   // 真正的 vkCmdDraw，由 PresentPass
 
 这些是**真实踩过并已修复**的坑；改相关代码前先读一遍，能省几个小时。
 
+> 调试 / 剖析基础设施相关的坑（`.ps1` 编码、syncval、device fault 等）单独收在 **§14.3**。
+
 ### 坑 1：CRLF 混杂导致补丁打不进去
 
 工程里同时存在 CRLF 和 LF 的文件（某些文件被不同工具改写过）。用脚本按行替换时，如果模式串用的是 LF 而文件是 CRLF，会**匹配不上却静默成功**。改文件前先确认行尾（`\r\n` 还是 `\n`），或者干脆按"整段唯一子串"替换而不是按行。
@@ -1034,6 +1036,17 @@ Remove-Item Env:\SENTINEL_SIMULATE_SSAO_SKIP
 
 ---
 
+### 调试 / 剖析回归入口（P0–P3）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Validate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Validate.ps1 -EnableProfiling
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/DeepValidation.ps1 -Frames 60
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Baseline.ps1 -Action Diff
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/DebugBundle.ps1 -Frames 150
+```
+
+详见 **§14** 与 `tools/README.md`。
 ## 12. 当前状态与待办
 
 ### 已完成（git 里程碑）
@@ -1173,3 +1186,65 @@ W1 还顺带挖出一个一直存在的真 bug：**析构顺序导致 Pass 持�
    ```
 4. 跑一遍第 11 节的验证工作流（**包括第 3 步"关掉 Pass 的分支"**），确认基线数字对得上。
 5. 读本文档 → 读 `ARCHITECTURE.md`（理解设计取舍）→ 读 `src/RHI/RenderGraph.h` 的头注释（理解同步模型）→ 从第 12 节"接下来"里挑 D-3 开始。
+
+---
+
+## 14. 调试 / 剖析基础设施（P0–P3）
+
+> 设计原则与阶段计划见 `DEBUG_PROFILE_PLAN.md`；工具用法见 `tools/README.md`。
+> 本节只记**怎么用**和**有什么坑**。
+>
+> **一条铁律**：所有调试 / 剖析能力都「随用随开」——**默认关闭，关闭时不分配、不插 GPU 命令、不落盘**。
+> 是否「编译进来」由 CMake 的 `SENTINEL_ENABLE_*` 决定；是否「本次开启」由命令行 flag 决定。
+> 关闭状态的行为必须与未接入这套设施时**字节级一致**。
+
+### 14.1 能力与开关
+
+| 能力 | 开关 | 产出 |
+|---|---|---|
+| 验证层结构化 | Debug 默认开 | 退出打印 `[Validation] errors=N warnings=M`；`--validation-jsonl <path>` 落 JSONL |
+| 验证层增强 | `--validation-features bp,sync,gpuav,printf` | Best Practices / 同步校验 / GPU-AV / 着色器 printf |
+| SPIR-V 静态校验 | 构建期自动（`spirv-val`） | 非法 SPIR-V 直接构建失败 |
+| 每 pass GPU 计时 | `--gpu-timing [--gpu-timing-csv <path>]` | `gpu_timing.csv`（frame,pass,gpu_ms）|
+| 无头截图 | `--screenshot <png> [--screenshot-frame N]` | 交换链最终图 PNG |
+| 诊断自检 | `--diagnostics-test [path]` | 合成消息 → 计数 + JSONL（不依赖 Vulkan）|
+| 设备故障 | `--device-fault-test` | `[DeviceFault]` 能力就绪自检 |
+| 能力清单 | `--build-info` | 编译进的 & 本次开启的调试能力 |
+| Tracy | `-DSENTINEL_ENABLE_TRACY=ON` | CPU zone + 每 pass GPU zone |
+| RenderDoc | `-DSENTINEL_ENABLE_RENDERDOC=ON` + `--capture-frame N` | `.rdc` 抓帧 |
+
+零开销守卫：每次运行结束会打印 `[Diag] zero-overhead guard PASS|SKIP|FAIL`。**默认（无 flag）必须是 `PASS | queryPool=0 | screenshotBuffer=0`**。
+
+### 14.2 工具速查
+
+| 工具 | 用途 |
+|---|---|
+| `tools/SetupProfiling.ps1` | 下载 Tracy（源码 + 工具二进制）与 `renderdoc_app.h` 到 `3rdParty` |
+| `tools/Profile.ps1` | 轻量包：`env.txt` + `gpu_timing.csv` + 日志 |
+| `tools/DebugBundle.ps1` | **一键全量证据包**（manifest + summary + run + validation + deep + baseline_diff）|
+| `tools/DeepValidation.ps1` | 深度校验作业：sync / bp / gpuav / printf，输出 `summary.json` |
+| `tools/Baseline.ps1` | 基线快照 + 三维度（GPU 时间 / 验证层 / 视觉）回归 diff |
+| `tools/Screenshot.ps1` | 无头截图 + 金标准图 diff |
+| `tools/Capture.ps1` | RenderDoc CLI 抓帧包装（需装 RenderDoc）|
+| `tools/Validate.ps1` | 主回归（`-EnableProfiling` 切剖析构建）|
+
+### 14.3 注意事项（全部是踩过的）
+
+1. **`tools/*.ps1` 必须纯 ASCII**。Windows PowerShell 5.1 读无 BOM 的 `.ps1` 按 ANSI 解码，**中文注释会吞掉下一行代码**（表现为"赋值/if 不执行"，极难查）。本项目已踩两次（`Profile.ps1`、`Baseline.ps1`）。
+2. **验证层消息绝不能写 stderr**。验收基线是 stderr 0 字节，所以 `Device` 的 debug 回调只把消息交给 diag 模块计数（+ 可选 JSONL）。
+3. **`--validation-features` 必须真的传到 Device**。曾因 `std::make_unique<Device>(window)` 没传 options 而**静默失效**——加 flag 后要用 `--build-info` 和 `[Diag] validation features enabled:` 双重确认。
+4. **`VK_ATTACHMENT_LOAD_OP_LOAD` 要同时声明读访问**。`writeColor`/`writeDepth` 若只声明 `*_WRITE`，syncval 会报 `SYNC-HAZARD-READ_AFTER_WRITE`。
+5. **graphics 等 `imageAvailable` 用 `ALL_COMMANDS`**。只等 `COLOR_ATTACHMENT_OUTPUT` 时，若交换链图像在更早阶段（布局转换）被访问，syncval 报与 acquire 的 `WRITE_AFTER_READ`。
+6. **`VK_EXT_device_fault` 只能在设备已 lost 时查询**（`VUID-vkGetDeviceFaultInfoEXT-device-07336`）。健康设备上只能校验"扩展已启用 + 入口点已解析"。
+7. **GPU 计时必须剔除预热帧**。冷启动 GPU 升频会让头几十帧明显偏慢；`Baseline.ps1` 默认丢前 30 帧，否则基线系统性偏慢 20%~45%。
+8. **`tracy-csvexport` 默认只导 CPU zone**，GPU zone 必须加 **`-g`**。
+9. **厂商专用工具是可选补充**。`nsys`/`ncu`（NVIDIA）、RGP/RGD/RGA（AMD）、GPA（Intel）都不进默认回归；默认链路只用厂商中立的 Tracy / RenderDoc / 验证层 / SPIRV-Tools / 截图。详见 `DEBUG_PROFILE_PLAN.md` §3 G 组。
+10. **Tracy / RenderDoc 依赖缺失时 CMake 会 warning 并自动禁用**，默认构建不受影响；`--build-info` 的 `tracy=` / `renderdoc=` 字段是最终事实。
+
+### 14.4 调试一个问题的推荐顺序
+
+1. `--build-info` 确认二进制里到底编译进了什么；
+2. `tools/DebugBundle.ps1` 拿一份全量证据（env / 验证层 / GPU 时间 / 截图 / 深度校验 / 基线 diff）；
+3. 按 `DEBUG_PROFILE_PLAN.md` §4 的「问题 → 工具」矩阵补专项证据（RenderDoc 抓帧 / Tracy 时间线）；
+4. 改完先跑 `tools/Validate.ps1`，确认 stderr 仍是 0 字节；
+5. 涉及性能/画面时再跑 `tools/Baseline.ps1 -Action Diff` 看有没有回归。

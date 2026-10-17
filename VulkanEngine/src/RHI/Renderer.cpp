@@ -253,8 +253,12 @@ void Renderer::endFrame(bool graphicsWaitsForCompute, bool computeWaitsForGraphi
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = &computeTimelineSemaphore;
 
-        if (vkQueueSubmit(vulkanDevice.getComputeQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+        const VkResult computeSubmit = vkQueueSubmit(vulkanDevice.getComputeQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (computeSubmit != VK_SUCCESS)
+        {
+            if (computeSubmit == VK_ERROR_DEVICE_LOST) vulkanDevice.reportDeviceFault();
             throw std::runtime_error("failed to submit compute command buffer!");
+        }
 
         computeSubmissionValues[currentFrameInFlightIndex] = signalValue;
     };
@@ -267,7 +271,10 @@ void Renderer::endFrame(bool graphicsWaitsForCompute, bool computeWaitsForGraphi
         };
         uint64_t waitValues[2] = { 0, signalValue };
         VkPipelineStageFlags waitStages[2] = {
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            // 放宽到 ALL_COMMANDS：交换链图像可能在 COLOR_ATTACHMENT_OUTPUT 之前的
+            // 阶段（如 FRAGMENT_SHADER / *_FRAGMENT_TESTS 的布局转换）被访问，
+            // 只等 COLOR_ATTACHMENT_OUTPUT 会让同步校验报与 acquire 的 WRITE_AFTER_READ。
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
         };
         const uint32_t waitCount = waitForCompute ? 2u : 1u;
@@ -296,8 +303,12 @@ void Renderer::endFrame(bool graphicsWaitsForCompute, bool computeWaitsForGraphi
         submitInfo.signalSemaphoreCount = 2;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(vulkanDevice.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+        const VkResult graphicsSubmit = vkQueueSubmit(vulkanDevice.getGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (graphicsSubmit != VK_SUCCESS)
+        {
+            if (graphicsSubmit == VK_ERROR_DEVICE_LOST) vulkanDevice.reportDeviceFault();
             throw std::runtime_error("failed to submit draw command buffer!");
+        }
 
         graphicsSubmissionValues[currentFrameInFlightIndex] = signalValue;
         lastSubmittedGraphicsFrame = signalValue;
@@ -333,5 +344,8 @@ void Renderer::endFrame(bool graphicsWaitsForCompute, bool computeWaitsForGraphi
         return;
     }
     if (presentResult != VK_SUCCESS)
+    {
+        if (presentResult == VK_ERROR_DEVICE_LOST) vulkanDevice.reportDeviceFault();
         throw std::runtime_error("failed to present swapchain image!");
+    }
 }

@@ -1,0 +1,73 @@
+#pragma once
+#include <string>
+#include <cstdint>
+
+// ============================================================================
+// 引擎诊断基础设施（P0）
+//
+// 设计原则见 DEBUG_PROFILE_PLAN.md §1.5：
+//   * 所有调试 / 剖析能力「随用随开」，关闭时对运行时性能零影响；
+//   * 「是否编译进来」由 CMake option -> SENTINEL_ENABLE_* 宏决定；
+//   * 「本次是否开启」由命令行 flag -> diag::Options 决定。
+//
+// 本文件不引入任何全局构造 / 分配：Options 由调用方（main）持有，
+// 验证层计数只在回调真正被调用时才累加。
+// ============================================================================
+
+namespace diag
+{
+    // ---- 编译期能力（CMake option -> 宏）----
+    struct CompileTimeFeatures
+    {
+        bool gpuTiming = false;
+        bool validationFeatures = false;
+        bool buildInfo = false;
+        bool screenshot = false;
+        bool tracy = false;
+        bool renderdoc = false;
+    };
+    CompileTimeFeatures compileTimeFeatures();
+
+    // ---- 运行期选项（main 在构造 FirstApp 前填好）----
+    struct Options
+    {
+        bool printBuildInfo = false;
+
+        // 验证层
+        bool validationBestPractices = false;
+        bool validationSync = false;
+        bool validationDebugPrintf = false;
+        bool validationGpuAssisted = false;
+        std::string validationJsonlPath;   // 空 = 不落盘
+
+        // GPU 计时
+        bool gpuTiming = false;
+        std::string gpuTimingCsvPath = "gpu_timing.csv";
+
+        // 截图 / 抓帧（P1）
+        bool screenshot = false;
+        std::string screenshotPath = "screenshot.png";
+        int  screenshotFrame = -1;   // -1 = 自动（selftest 最后一帧）
+        int  captureFrame = -1;      // RenderDoc in-app 抓帧的帧号（P1-2）
+    };
+
+    // 验证层消息落盘路径（空 = 关闭）。启动时调用一次。
+    void configureValidationLog(const std::string& jsonlPath);
+
+    // Device 的 debug 回调调用。severity: 1=error, 2=warning, 3=info/verbose。
+    // 绝不写 stderr —— 保持「stderr 0 字节」的验收基线。
+    void recordValidationMessage(int severity, const char* messageId, const char* message);
+    uint32_t validationErrorCount();
+    uint32_t validationWarningCount();
+    void printValidationSummary();
+
+    // --build-info：打印「编译进来的」与「本次开启的」能力清单。
+    void printBuildInfo(const Options& options);
+
+    // 重置验证层计数（自检用）。
+    void resetValidationCounts();
+
+    // 诊断管线自检（不需要 Vulkan）：写入合成消息并校验计数 + JSONL 落盘。
+    // 用于在没有真实验证层消息时也能回归"结构化输出 + 落盘"这条链路。
+    bool selfTest(const std::string& jsonlPath);
+}

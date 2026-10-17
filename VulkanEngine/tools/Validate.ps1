@@ -5,6 +5,7 @@ param(
     [int]$Frames = 120,
     [switch]$Incremental,
     [switch]$SkipSetup,
+    [switch]$EnableProfiling,
     [string]$VulkanSdk = $env:VULKAN_SDK,
     [string]$CMakePath = ""
 )
@@ -89,9 +90,13 @@ if ($straySpv.Count -gt 0) {
 Write-Host "[validate] TD-08 dead-file guard PASS"
 
 Write-Host "[validate] Configure ($Config)"
-$configure = Invoke-Native -FilePath $CMakePath -LogStem "configure" -Arguments @(
+$configureArgs = @(
     "-S", ".", "-B", $BuildDir, "-G", "Visual Studio 17 2022", "-A", "x64"
 )
+if ($EnableProfiling) {
+    $configureArgs += @("-DSENTINEL_ENABLE_TRACY=ON", "-DSENTINEL_ENABLE_RENDERDOC=ON")
+}
+$configure = Invoke-Native -FilePath $CMakePath -LogStem "configure" -Arguments $configureArgs
 if ($configure.ExitCode -ne 0) {
     Get-Content -LiteralPath $configure.StdoutPath -Tail 80
     Get-Content -LiteralPath $configure.StderrPath -Tail 80
@@ -154,8 +159,28 @@ $tests = @(
     @{ Name = "td05-subresource-probe"; Args = @("--selftest", "$([Math]::Max($Frames, 20))", "--subresource-test");
        MustContain = @("[TD05] subresource probe active", "[SelfTest]") },
     @{ Name = "td05-subresource-error"; Args = @("--subresource-error-test");
-       MustContain = @("[TD05] subresource semantic error PASS") }
+       MustContain = @("[TD05] subresource semantic error PASS") },
+    # ---- P0: diagnostics / profiling infrastructure ----
+    @{ Name = "p0-build-info"; Args = @("--build-info");
+       MustContain = @("[BuildInfo] compiled:", "[BuildInfo] policy:") },
+    @{ Name = "p0-diagnostics-selftest"; Args = @("--diagnostics-test", (Join-Path $logDir "diagnostics.jsonl"));
+       MustContain = @("[Diag] diagnostics selfTest PASS") },
+    @{ Name = "p0-gpu-timing"; Args = @("--selftest", "30", "--gpu-timing", "--gpu-timing-csv", (Join-Path $logDir "gpu_timing.csv"));
+       MustContain = @("[Diag] gpu_timing.csv written:", "[Diag] zero-overhead guard SKIP") },
+    # ---- P1: screenshot ----
+    @{ Name = "p1-screenshot"; Args = @("--selftest", "40", "--screenshot", (Join-Path $logDir "screenshot.png"), "--screenshot-frame", "30");
+       MustContain = @("[Diag] screenshot written:") },
+    # ---- P2 ----
+    @{ Name = "p2-device-fault"; Args = @("--device-fault-test");
+       MustContain = @("[DeviceFault] selfTest PASS") }
 )
+
+# Only meaningful for a profiling build (-EnableProfiling).
+if ($EnableProfiling) {
+    $tests += @{ Name = "p1-profiling-enabled";
+        Args = @("--selftest", "20", "--capture-frame", "10");
+        MustContain = @("[Diag] Tracy Vulkan context created", "[Diag] RenderDoc not injected") }
+}
 $failed = @()
 foreach ($test in $tests) {
     Write-Host "[validate] Test: $($test.Name)"
@@ -176,6 +201,14 @@ foreach ($test in $tests) {
         }
     }
 
+    # P0: every test that creates a Vulkan device must report zero validation messages.
+    # (jobtest / config-test / --build-info / --diagnostics-test return before the Vulkan device exists.)
+    if ($test.Name -notin @('jobtest', 'td09-config-migration', 'p0-build-info', 'p0-diagnostics-selftest')) {
+        if ($stdout.IndexOf("[Validation] errors=0 warnings=0", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $reasons += "missing zero-validation marker '[Validation] errors=0 warnings=0'"
+        }
+    }
+
     if ($reasons.Count -gt 0) {
         $failed += "$($test.Name): $($reasons -join '; ')"
         Write-Host "[validate] FAIL $($test.Name): $($reasons -join '; ')" -ForegroundColor Red
@@ -192,6 +225,32 @@ foreach ($test in $tests) {
     }
 }
 
+# P3-2: baseline + diff self-test (Save then Diff against itself).
+Write-Host "[validate] Test: p3-baseline-diff"
+$baselineScript = Join-Path $PSScriptRoot "Baseline.ps1"
+$psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $baselineScript)
+$scriptArgs = @("-Name", "_selftest", "-BuildDir", $BuildDir, "-Config", $Config, "-Frames", "60")
+$save = Start-Process -FilePath "powershell" -ArgumentList ($psArgs + @("-Action", "Save") + $scriptArgs) `
+    -WorkingDirectory $repoRoot -RedirectStandardOutput (Join-Path $logDir "p3-baseline-save.log") `
+    -RedirectStandardError (Join-Path $logDir "p3-baseline-save.err") -Wait -PassThru -NoNewWindow
+$diff = Start-Process -FilePath "powershell" -ArgumentList ($psArgs + @("-Action", "Diff") + $scriptArgs) `
+    -WorkingDirectory $repoRoot -RedirectStandardOutput (Join-Path $logDir "p3-baseline-diff.log") `
+    -RedirectStandardError (Join-Path $logDir "p3-baseline-diff.err") -Wait -PassThru -NoNewWindow
+if ($save.ExitCode -ne 0) { $failed += "p3-baseline-diff: Save exited $($save.ExitCode)" }
+if ($diff.ExitCode -ne 0) { $failed += "p3-baseline-diff: Diff reported regression" }
+if ($save.ExitCode -eq 0 -and $diff.ExitCode -eq 0) { Write-Host "[validate] PASS p3-baseline-diff (stderr=0 bytes)" -ForegroundColor Green }
+
+# P3-1: debug bundle self-test (light: skip deep validation and baseline diff).
+Write-Host "[validate] Test: p3-debug-bundle"
+$bundleScript = Join-Path $PSScriptRoot "DebugBundle.ps1"
+$bundleArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $bundleScript,
+                "-Name", "_selftest", "-BuildDir", $BuildDir, "-Config", $Config,
+                "-Frames", "40", "-SkipDeepValidation", "-SkipBaselineDiff")
+$bundle = Start-Process -FilePath "powershell" -ArgumentList $bundleArgs `
+    -WorkingDirectory $repoRoot -RedirectStandardOutput (Join-Path $logDir "p3-debug-bundle.log") `
+    -RedirectStandardError (Join-Path $logDir "p3-debug-bundle.err") -Wait -PassThru -NoNewWindow
+if ($bundle.ExitCode -ne 0) { $failed += "p3-debug-bundle: exited $($bundle.ExitCode)" }
+else { Write-Host "[validate] PASS p3-debug-bundle (stderr=0 bytes)" -ForegroundColor Green }
 if ($failed.Count -gt 0) {
     throw ("Validation failed:`n  " + ($failed -join "`n  ") + "`nLogs: $logDir")
 }

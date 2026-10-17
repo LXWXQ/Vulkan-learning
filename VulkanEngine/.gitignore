@@ -1,4 +1,4 @@
-﻿# 构建产物
+# 构建产物
 imgui.ini
 build/
 out/
@@ -14,3 +14,14 @@ Resources/
 
 # 文档笔记
 RTR4_Notes/
+
+# 调试 / 剖析工具在仓库根直接运行时可能产生的默认输出
+/gpu_timing.csv
+/screenshot.png
+/validation.jsonl
+/diagnostics_selftest.jsonl
+/*.tracy
+/*.log
+/profiles/
+/bundles/
+/baseline/

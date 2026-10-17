@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 
+#include "Core/Diagnostics.h"   // diag::Options（P0：调试/验证开关）
+
 struct QueueFamilyIndices 
 {
     std::optional<uint32_t> graphicsFamily;
@@ -25,7 +27,8 @@ struct QueueFamilyIndices
 class Device
 {
 public:
-    Device(GLFWwindow* window);
+    // P0：options 携带验证层增强开关（--validation-features）。
+    Device(GLFWwindow* window, const diag::Options& options = {});
     ~Device();
 
     Device(const Device&) = delete;
@@ -39,6 +42,11 @@ public:
 	VkQueue getComputeQueue() { return computeQueue; }
 	bool hasDedicatedComputeQueue() const { return dedicatedComputeQueue; }
 	VkInstance getInstance() { return instance; }
+
+// P2-4：VK_EXT_device_fault。设备不支持时 reportDeviceFault() 返回 false。
+bool isDeviceFaultSupported() const { return deviceFaultSupported; }
+bool reportDeviceFault();
+bool hasDeviceFaultEntryPoint() const { return pfnGetDeviceFaultInfoEXT != nullptr; }
 	VmaAllocator getVmaAllocator() { return vmaAllocator; }
 
 	// 打印 VMA 统计，并返回"还有多少个分配没释放"。
@@ -81,7 +89,16 @@ private:
 	VkQueue presentQueue;
 	VkQueue computeQueue;
 	bool dedicatedComputeQueue = false;
+bool deviceFaultSupported = false;
+// P2-4：扩展函数必须经 vkGetDeviceProcAddr 获取（导入库不导出它）。
+PFN_vkGetDeviceFaultInfoEXT pfnGetDeviceFaultInfoEXT = nullptr;
 	VmaAllocator vmaAllocator;
+
+    // P0-2：验证层增强（best practices / 同步校验），来自命令行 --validation-features。
+    bool validationBestPractices = false;
+    bool validationSync = false;
+    bool validationDebugPrintf = false;
+    bool validationGpuAssisted = false;
 
     const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
     const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };

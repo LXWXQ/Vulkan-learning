@@ -97,6 +97,10 @@ void Swapchain::createSwapChain(VkSwapchainKHR oldSwapchain)
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+#ifdef SENTINEL_ENABLE_SCREENSHOT
+    // P1-4：把交换链图像拷到 staging buffer 需要 TRANSFER_SRC。
+    createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+#endif
 
     QueueFamilyIndices indices = device.findPhysicalQueueFamilies();
     uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};

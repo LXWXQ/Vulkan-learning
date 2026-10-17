@@ -141,6 +141,56 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Threads::Threads
 )
 
+# ---------------------------------------------------------------------------
+# 调试 / 剖析能力开关（P0）。
+#
+# 原则（见 DEBUG_PROFILE_PLAN.md §1.5）：能力「随用随开」，关闭时零开销。
+#   * 是否「编译进来」= 下面的 CMake option（-> SENTINEL_ENABLE_* 宏）；
+#   * 是否「本次开启」= 命令行 flag（如 --gpu-timing）。
+# 重量级 / 带外部依赖的能力默认 OFF（P1 的 Tracy / RenderDoc 走 SENTINEL_ENABLE_PROFILER）。
+# ---------------------------------------------------------------------------
+option(SENTINEL_ENABLE_GPU_TIMING "编译入 --gpu-timing（每 pass GPU 计时）" ON)
+option(SENTINEL_ENABLE_VALIDATION_FEATURES "编译入 --validation-features（best practices / sync）" ON)
+option(SENTINEL_ENABLE_BUILD_INFO "编译入 --build-info（能力清单自报）" ON)
+option(SENTINEL_ENABLE_SCREENSHOT "编译入 --screenshot（无头截图 + 视觉回归）" ON)
+option(SENTINEL_ENABLE_TRACY "编译入 Tracy 时间线剖析（需要 3rdParty/tracy）" OFF)
+option(SENTINEL_ENABLE_RENDERDOC "编译入 RenderDoc 抓帧挂钩（需要 3rdParty/renderdoc/renderdoc_app.h）" OFF)
+
+if(SENTINEL_ENABLE_GPU_TIMING)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_GPU_TIMING)
+endif()
+if(SENTINEL_ENABLE_VALIDATION_FEATURES)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_VALIDATION_FEATURES)
+endif()
+if(SENTINEL_ENABLE_BUILD_INFO)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_BUILD_INFO)
+endif()
+if(SENTINEL_ENABLE_SCREENSHOT)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_SCREENSHOT)
+endif()
+
+# P1-1：Tracy 需要 3rdParty/tracy；源不存在时强制关闭，保证默认（OFF）构建不受影响。
+if(SENTINEL_ENABLE_TRACY)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tracy/public/tracy/Tracy.hpp" OR EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tracy/tracy/Tracy.hpp")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_TRACY TRACY_ENABLE TRACY_ON_DEMAND)
+        target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tracy/public")
+        target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/tracy/public/TracyClient.cpp")
+        message(STATUS "Tracy profiling enabled")
+    else()
+        message(WARNING "SENTINEL_ENABLE_TRACY=ON but 3rdParty/tracy not found; Tracy disabled. See tools/SetupDependencies.ps1")
+    endif()
+endif()
+
+# P1-2：RenderDoc in-app 抓帧需要 renderdoc_app.h；缺失时强制关闭。
+if(SENTINEL_ENABLE_RENDERDOC)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/renderdoc/renderdoc_app.h")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE SENTINEL_ENABLE_RENDERDOC)
+        target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/3rdParty/renderdoc")
+        message(STATUS "RenderDoc capture hook enabled")
+    else()
+        message(WARNING "SENTINEL_ENABLE_RENDERDOC=ON but 3rdParty/renderdoc/renderdoc_app.h not found; disabled.")
+    endif()
+endif()
 # shader 编译器同样由 Vulkan SDK 的 CMake 包给出，避免第二处硬编码路径。
 set(GLSL_VALIDATOR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}")
 if(NOT GLSL_VALIDATOR OR NOT EXISTS "${GLSL_VALIDATOR}")
@@ -150,6 +200,15 @@ if(NOT GLSL_VALIDATOR)
     message(FATAL_ERROR "找不到 glslangValidator。请安装 Vulkan SDK，或传 -DGLSL_VALIDATOR=<路径>。")
 endif()
 
+# P0-3：SPIR-V 静态校验器（glslangValidator 只保证能生成，不保证合法）。
+get_filename_component(GLSLANG_DIR "${GLSL_VALIDATOR}" DIRECTORY)
+find_program(SPIRV_VAL_EXECUTABLE NAMES spirv-val spirv-val.exe HINTS "${GLSLANG_DIR}")
+if(SPIRV_VAL_EXECUTABLE)
+    message(STATUS "spirv-val found: ${SPIRV_VAL_EXECUTABLE}")
+else()
+    message(WARNING "找不到 spirv-val，跳过 SPIR-V 静态校验。")
+endif()
+
 set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(OUTPUT_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 
@@ -157,12 +216,22 @@ file(MAKE_DIRECTORY ${OUTPUT_SHADER_DIR})
 
 file(GLOB SHADER_FILES CONFIGURE_DEPENDS "${SHADER_DIR}/*.vert" "${SHADER_DIR}/*.frag" "${SHADER_DIR}/*.comp")
 foreach(SHADER_FILE ${SHADER_FILES})
-  
     get_filename_component(FILE_NAME ${SHADER_FILE} NAME)
-    
+    set(SHADER_OUTPUT "${OUTPUT_SHADER_DIR}/${FILE_NAME}.spv")
+
+    # P0-3：glslangValidator 生成 SPIR-V 后，用 spirv-val 做静态合法性校验。
+    if(SPIRV_VAL_EXECUTABLE)
+        set(SPIRV_VAL_STEP COMMAND ${SPIRV_VAL_EXECUTABLE} "${SHADER_OUTPUT}")
+    else()
+        set(SPIRV_VAL_STEP "")
+    endif()
+
     add_custom_command(
         TARGET ${PROJECT_NAME} PRE_BUILD
-        COMMAND ${GLSL_VALIDATOR} -V "${SHADER_FILE}" -o "${OUTPUT_SHADER_DIR}/${FILE_NAME}.spv"
-        COMMENT "自动编译 Shader: ${FILE_NAME} -> ${FILE_NAME}.spv"
+        # --target-env vulkan1.3 隐含 SPIR-V 1.6：compute 会改用 LocalSizeId 执行模式，
+        # 不再使用 SPIR-V 1.6 已弃用的 WorkgroupSize 内建（否则 best-practices 每次报 2 条 warning）。
+        COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.3 "${SHADER_FILE}" -o "${SHADER_OUTPUT}"
+        ${SPIRV_VAL_STEP}
+        COMMENT "自动编译并校验 Shader: ${FILE_NAME}"
     )
 endforeach()

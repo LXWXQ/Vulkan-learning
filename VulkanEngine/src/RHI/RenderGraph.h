@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Device.h"
+#include "GpuTimer.h"   // P0-4：每 pass GPU 计时
+
+class GpuProfiler;   // P1-1：Tracy GPU zone（前置声明，避免头文件污染）
 #include <vulkan/vulkan.h>
 #include <string>
 #include <vector>
@@ -231,8 +234,31 @@ public:
     // D-5：graphics / compute 两条命令流。compute 为 VK_NULL_HANDLE 时，
     // 所有 pass 仍按原来的单队列路径记录（便于旧调用方/测试降级）。
     void beginFrame(VkCommandBuffer graphicsCommandBuffer,
-                    VkCommandBuffer computeCommandBuffer = VK_NULL_HANDLE);
+                    VkCommandBuffer computeCommandBuffer = VK_NULL_HANDLE,
+                    uint32_t frameSlot = 0,
+                    uint64_t frameNumber = 0);
     void endFrame();     // 按顺序执行所有 Pass
+
+    // P0-4：每 pass GPU 计时挂钩。SENTINEL_ENABLE_GPU_TIMING 关闭时是空实现，
+    // 默认构建为此一处也不产生（零分支、零命令）。
+    void setGpuTimer(GpuTimer* timer) { gpuTimer = timer; }
+    void setGpuProfiler(GpuProfiler* profiler) { gpuProfiler = profiler; }
+    inline void onPassTimingBegin(VkCommandBuffer cmd, uint32_t passIndex, const char* name)
+    {
+#ifdef SENTINEL_ENABLE_GPU_TIMING
+        if (gpuTimer) gpuTimer->beginPass(cmd, currentFrameSlot, passIndex, name);
+#else
+        (void)cmd; (void)passIndex; (void)name;
+#endif
+    }
+    inline void onPassTimingEnd(VkCommandBuffer cmd, uint32_t passIndex)
+    {
+#ifdef SENTINEL_ENABLE_GPU_TIMING
+        if (gpuTimer) gpuTimer->endPass(cmd, currentFrameSlot, passIndex);
+#else
+        (void)cmd; (void)passIndex;
+#endif
+    }
 
     // ---- Pass 注册 ----
     Pass& addGraphicsPass(const std::string& name);
@@ -333,6 +359,11 @@ private:
     // 与屏障推导（同步正确性）是两件不同的事 —— 这个查的是"语义正确性"，
     // 验证层对此一言不发（从 UNDEFINED 布局转出来本身完全合法）。
     void validateWriteCoverage();
+
+    // P0-4：GPU 计时（nullptr = 关闭；编译期关闭时该指针恒为 nullptr）。
+    GpuTimer* gpuTimer = nullptr;
+    GpuProfiler* gpuProfiler = nullptr;   // P1-1
+    uint32_t currentFrameSlot = 0;
 
     Device& device;
     VkCommandBuffer cmd = VK_NULL_HANDLE;          // graphics command buffer

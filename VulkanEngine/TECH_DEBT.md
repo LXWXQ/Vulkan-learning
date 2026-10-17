@@ -9,35 +9,28 @@
 
 ## 0. 当前基线
 
-- 当前 HEAD（整理本文档时）：`cd7d695`
-- `D-6 Job System` 与 `D-7 EnTT ECS` 的改动可能仍在工作区，新对话先运行：
-  ```powershell
-  git status --short --branch
-  git log -5 --oneline
-  ```
-- 本机 Vulkan SDK：`D:/work/vulkan`，CMake 通过 `find_package(Vulkan REQUIRED)` 自动定位。
-- 已实现到 D-7：渲染图 / HDR+Bloom / bindless / 多帧在飞 / 异步 compute / Job System / EnTT ECS。
-- 最近一次验证：
-  - 全新 configure + Debug build：通过，无编译警告。
-  - `--jobtest`：PASS，stderr 0 字节。
-  - 四种 `--selftest 120` 组合：stderr 全部 0 字节。
-  - 正常窗口：约 504 FPS，`draw calls 104`，`desc binds 1`。
-  - `[Scene] ECS/spatial selfTest PASS`，`[D5] async compute probe verified` 正常出现。
+- **工作区没有 `.git` 元数据**，不能依赖 `git log` / `git status`；以文件系统实际内容为准。
+- 本机 Vulkan SDK：`D:/work/vulkan`，CMake 通过 `find_package(Vulkan REQUIRED)` 自动定位（不再有硬编码路径）。
+- 已实现：D-1 ~ D-7（渲染图 / HDR+Bloom / bindless / 多帧在飞 / 异步 compute / Job System / EnTT ECS）
+  + **调试 / 剖析基础设施 P0–P3**（验证层结构化、`spirv-val`、`--gpu-timing`、Tracy、RenderDoc、无头截图、
+  深度校验作业、`VK_EXT_device_fault`、基线 diff、一键证据包）。
+- 最近一次验证（2026-10-17）：
+  - `tools/Validate.ps1`：**18 项引擎用例 + 2 项工具自测全 PASS**，stderr 全 0 字节。
+  - `tools/Validate.ps1 -EnableProfiling`（Tracy / RenderDoc ON）：**19 项引擎用例 + 2 项工具自测全 PASS**。
+  - `tools/DeepValidation.ps1`：`sync 0 errors / 0 warnings`、`bp 11`（良性）、`gpuav 2`、`printf 1` → PASS。
+  - 正常窗口：约 500 FPS，`draw calls 104`，`desc binds 1`。
 
 ### 基线命令
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-.\build\Debug\VulkanEngine.exe --jobtest
-.\build\Debug\VulkanEngine.exe --selftest 120
-.\build\Debug\VulkanEngine.exe --selftest 120 --no-bloom
-.\build\Debug\VulkanEngine.exe --selftest 120 --no-ssao
-.\build\Debug\VulkanEngine.exe --selftest 120 --no-bloom --no-ssao
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Validate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Validate.ps1 -EnableProfiling
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/DeepValidation.ps1 -Frames 60
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/Baseline.ps1 -Action Diff
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/DebugBundle.ps1 -Frames 150
 ```
 
-> 注意：新增 `src/*.cpp` 后必须先重新 configure（`SOURCES` 的 glob 没有 `CONFIGURE_DEPENDS`）。
----
+> 注意：`SOURCES` 使用 `CONFIGURE_DEPENDS`，但全新验证脚本仍会主动 configure；新增 `src/*.cpp` 后建议直接重跑 `tools/Validate.ps1`。
 
 ## 1. 优先级总表
 
@@ -52,6 +45,7 @@ cmake --build build --config Debug
 | TD-07 | P2 | ComputeProbePass 是固定开销探针 | 每帧固定 GPU 成本 | 真正 compute 任务接入时 |
 | TD-08 | P2 | 遗留代码/废弃 shader/死接口 | 阅读成本、误用风险 | 清理窗口 |
 | TD-09 | P2 | EngineConfig.version 没人读，无迁移/预设 | 配置格式变化时静默不兼容 | 配置扩展前 |
+| TD-10 | P2 | RenderGraph 同步语义缺口（LOAD 读访问 / acquire 等待阶段）| syncval 报 hazard，会掩盖后续真实问题 | **已完成** |
 
 ### 不属于本清单的内容
 
@@ -367,7 +361,40 @@ PresentPass 准备两套描述符绑定：
 - 损坏配置不会覆盖原文件。
 ---
 
-## 11. 建议解决顺序
+## 11. TD-10（P2）RenderGraph 同步语义缺口（已完成）
+
+### 现状（修复前）
+
+`--validation-features sync`（同步校验）在默认场景报出两类 hazard：
+
+- `SYNC-HAZARD-READ-AFTER-WRITE` ×10：`writeColor` / `writeDepth` 无论 `loadOp` 是什么都只声明 `*_WRITE` 访问位，而 `VK_ATTACHMENT_LOAD_OP_LOAD` 会**读取**附件原内容（Bloom 的 Up 级累加正是 LOAD）。
+- `SYNC-HAZARD-WRITE-AFTER-READ` ×5：graphics 等待 `imageAvailable` 的 stage 只到 `COLOR_ATTACHMENT_OUTPUT`，而交换链图像的布局转换可能发生在更早的 stage，与 `vkAcquireNextImageKHR` 竞争。
+
+### 为什么必须修
+
+这两类在多数驱动上"良性"（执行依赖其实存在），但：
+
+1. 它们是真实的同步语义缺口，属于规范层面的欠声明；
+2. 更关键的是——**新引入的 hazard 会淹没在旧噪声里**，等于失去同步校验这个工具。任何 GPU-driven / 跨队列特性开工前，这条基线必须是干净的。
+
+### 修法
+
+1. `Pass::writeColor` / `Pass::writeDepth`：`loadOp == LOAD` 时把 `*_ATTACHMENT_READ_BIT` 一并 OR 进访问位；
+2. `Renderer` 中 `imageAvailable` 的 `pWaitDstStageMask` 从 `COLOR_ATTACHMENT_OUTPUT` 放宽到 `ALL_COMMANDS`。
+
+### 验收标准（已达成）
+
+- `--validation-features sync` 报 **0 errors / 0 warnings**（5 帧与 30 帧均验证）；
+- `tools/Validate.ps1` 全绿、stderr 0 字节；
+- `tools/DeepValidation.ps1` 中 `sync` 模式作为门禁项通过。
+
+### 顺带记录
+
+`--validation-features bp` 余 11 条 warning 均为良性提示（VMA 专用块绑定 ×11）；SPIR-V `WorkgroupSize` 弃用已通过 `--target-env vulkan1.3` 清除。
+
+---
+
+## 12. 建议解决顺序
 
 1. ~~**TD-01**：先把构建与验证做成可重复的一条命令。~~ 已完成。
 2. ~~**TD-02**：补 compute/graphics 跨队列同步，这是后续 GPU 驱动渲染的前置条件。~~ 已完成。
@@ -376,8 +403,9 @@ PresentPass 准备两套描述符绑定：
    下一项从 **TD-06** 开始。
 5. ~~**TD-06**：关闭 Bloom 的固定 pass 开销。~~ ~~**TD-07**：ComputeProbePass
    固定开销。~~ 均已完成。
-6. ~~**TD-08**：遗留代码与废弃接口。~~ ~~**TD-09**：配置版本迁移。~~ 已完成；
-   当前技术债清单已清空。
+6. ~~**TD-08**：遗留代码与废弃接口。~~ ~~**TD-09**：配置版本迁移。~~ 已完成。
+7. ~~**TD-10**：RenderGraph 同步语义补全（LOAD 读访问位 + acquire 等待阶段）。~~ 已完成；
+   当前技术债清单已清空（syncval 基线为 0 errors）。
 
 每修完一项，至少跑：
 

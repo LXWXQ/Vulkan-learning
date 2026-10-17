@@ -31,15 +31,44 @@ namespace
         }
     }
 
+    // P0-1：验证层消息不再写 stderr（那会破坏"stderr 0 字节"的验收基线），
+    // 改为交给 diag 模块：累计 error/warning 计数，并在显式请求时写 JSONL。
+    // P2-4：查询某个 device extension 是否被支持。
+    static bool deviceHasExtension(VkPhysicalDevice physDev, const char* name)
+    {
+        uint32_t count = 0;
+        vkEnumerateDeviceExtensionProperties(physDev, nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> props(count);
+        vkEnumerateDeviceExtensionProperties(physDev, nullptr, &count, props.data());
+        for (const VkExtensionProperties& p : props)
+            if (std::strcmp(p.extensionName, name) == 0) return true;
+        return false;
+    }
+
+    static int mapValidationSeverity(VkDebugUtilsMessageSeverityFlagBitsEXT severity)
+    {
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)   return 1;
+        if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) return 2;
+        return 3;   // info / verbose
+    }
+
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,VkDebugUtilsMessageTypeFlagsEXT messageType,const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,void* pUserData) 
     {
-        std::cerr << "Validation Layer: " << pCallbackData->pMessage << std::endl;
+        diag::recordValidationMessage(mapValidationSeverity(messageSeverity),
+                                      pCallbackData->pMessageIdName,
+                                      pCallbackData->pMessage);
+        (void)messageType;
+        (void)pUserData;
         return VK_FALSE;
     }
 }
 
-Device::Device(GLFWwindow* window) : window(window) 
+Device::Device(GLFWwindow* window, const diag::Options& options) : window(window) 
 {
+    validationBestPractices = options.validationBestPractices;
+    validationSync = options.validationSync;
+    validationDebugPrintf = options.validationDebugPrintf;
+    validationGpuAssisted = options.validationGpuAssisted;
     createInstance();
     setupDebugMessenger();
     createSurface();
@@ -91,6 +120,52 @@ size_t Device::reportVmaStats(const char* stage)
     return totalAllocs;
 }
 
+bool Device::reportDeviceFault()
+{
+    if (!deviceFaultSupported || pfnGetDeviceFaultInfoEXT == nullptr)
+    {
+        std::cout << "[DeviceFault] VK_EXT_device_fault not enabled on this device\n";
+        return false;
+    }
+
+    VkDeviceFaultCountsEXT counts{ VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT };
+    if (pfnGetDeviceFaultInfoEXT(device, &counts, nullptr) != VK_SUCCESS)
+    {
+        std::cout << "[DeviceFault] count query failed\n";
+        return false;
+    }
+
+    std::vector<VkDeviceFaultAddressInfoEXT> addressInfos(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendorInfos(counts.vendorInfoCount);
+
+    VkDeviceFaultInfoEXT info{ VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT };
+    info.pAddressInfos = addressInfos.empty() ? nullptr : addressInfos.data();
+    info.pVendorInfos = vendorInfos.empty() ? nullptr : vendorInfos.data();
+
+    if (pfnGetDeviceFaultInfoEXT(device, &counts, &info) != VK_SUCCESS)
+    {
+        std::cout << "[DeviceFault] info query failed\n";
+        return false;
+    }
+
+    std::cout << "[DeviceFault] description=\"" << info.description << "\""
+              << " addresses=" << counts.addressInfoCount
+              << " vendors=" << counts.vendorInfoCount
+              << " vendorBinaryBytes=" << counts.vendorBinarySize << "\n";
+
+    for (const VkDeviceFaultAddressInfoEXT& a : addressInfos)
+        std::cout << "[DeviceFault]   addressType=" << static_cast<int>(a.addressType)
+                  << " reported=0x" << std::hex << a.reportedAddress
+                  << " precision=0x" << a.addressPrecision << std::dec << "\n";
+
+    for (const VkDeviceFaultVendorInfoEXT& v : vendorInfos)
+        std::cout << "[DeviceFault]   vendor=\"" << v.description << "\""
+                  << " code=0x" << std::hex << v.vendorFaultCode
+                  << " data=0x" << v.vendorFaultData << std::dec << "\n";
+
+    return true;
+}
+
 void Device::createInstance() 
 {
     if (enableValidationLayers && !checkValidationLayerSupport()) 
@@ -125,6 +200,36 @@ void Device::createInstance()
     {
         createInfo.enabledLayerCount = 0;
     }
+
+    // P0-2：验证层增强能力（best practices / 同步校验）走 VkValidationFeaturesEXT。
+    // 默认不启用；只有 --validation-features 显式请求时才把结构体挂上 pNext。
+#ifdef SENTINEL_ENABLE_VALIDATION_FEATURES
+    VkValidationFeaturesEXT validationFeatures{ VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT };
+    std::vector<VkValidationFeatureEnableEXT> enabledValidationFeatures;
+    if (enableValidationLayers && validationBestPractices)
+        enabledValidationFeatures.push_back(VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT);
+    if (enableValidationLayers && validationSync)
+        enabledValidationFeatures.push_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+    if (enableValidationLayers && validationDebugPrintf)
+        enabledValidationFeatures.push_back(VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT);
+    if (enableValidationLayers && validationGpuAssisted)
+        enabledValidationFeatures.push_back(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
+    if (!enabledValidationFeatures.empty())
+    {
+        validationFeatures.enabledValidationFeatureCount =
+            static_cast<uint32_t>(enabledValidationFeatures.size());
+        validationFeatures.pEnabledValidationFeatures = enabledValidationFeatures.data();
+        validationFeatures.pNext = const_cast<void*>(createInfo.pNext);
+        createInfo.pNext = &validationFeatures;
+
+        std::cout << "[Diag] validation features enabled:";
+        if (validationBestPractices) std::cout << " best-practices";
+        if (validationSync) std::cout << " synchronization";
+        if (validationDebugPrintf) std::cout << " debug-printf";
+        if (validationGpuAssisted) std::cout << " gpu-assisted";
+        std::cout << "\n";
+    }
+#endif
 
     if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) 
     {
@@ -284,6 +389,17 @@ void Device::createLogicalDevice()
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
     deviceFeatures.fragmentStoresAndAtomics = VK_TRUE;
+    if (validationGpuAssisted)
+    {
+        // 显式启用以避免验证层在 vkCreateDevice 时"强制"打开（它会警告）。
+        if (supportedFeatures.features.shaderInt64)
+            deviceFeatures.shaderInt64 = VK_TRUE;
+        deviceFeatures.vertexPipelineStoresAndAtomics = VK_TRUE;
+        if (supported12.vulkanMemoryModel)
+            features12.vulkanMemoryModel = VK_TRUE;
+        if (supported12.vulkanMemoryModelDeviceScope)
+            features12.vulkanMemoryModelDeviceScope = VK_TRUE;
+    }
 
     VkPhysicalDeviceFeatures2 enabledFeatures{};
     enabledFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -296,8 +412,16 @@ void Device::createLogicalDevice()
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = nullptr;      // 特性全部走 pNext 链
     createInfo.pNext = &enabledFeatures;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    // P2-4：若支持 VK_EXT_device_fault，则启用（device-lost 时能取到故障信息）。
+    std::vector<const char*> enabledDeviceExtensions(deviceExtensions.begin(), deviceExtensions.end());
+    if (deviceHasExtension(physicalDevice, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+    {
+        enabledDeviceExtensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        deviceFaultSupported = true;
+    }
+
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
 
     if (enableValidationLayers) 
     {
@@ -318,6 +442,18 @@ void Device::createLogicalDevice()
     vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
     vkGetDeviceQueue(device, indices.computeFamily.value(), 0, &computeQueue);
     dedicatedComputeQueue = indices.computeFamily.value() != indices.graphicsFamily.value();
+
+    // P2-4：扩展入口点必须用 vkGetDeviceProcAddr 取（vulkan-1.lib 不导出它）。
+    if (deviceFaultSupported)
+    {
+        pfnGetDeviceFaultInfoEXT = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+            vkGetDeviceProcAddr(device, "vkGetDeviceFaultInfoEXT"));
+        if (pfnGetDeviceFaultInfoEXT == nullptr)
+        {
+            deviceFaultSupported = false;
+            std::cout << "[DeviceFault] VK_EXT_device_fault 已启用但取不到入口点，功能关闭\\n";
+        }
+    }
 
     std::cout << "[Device] Queue families: graphics=" << indices.graphicsFamily.value()
               << " present=" << indices.presentFamily.value()
@@ -407,6 +543,10 @@ std::vector<const char*> Device::getRequiredExtensions()
     if (enableValidationLayers)
     {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#ifdef SENTINEL_ENABLE_VALIDATION_FEATURES
+        if (validationBestPractices || validationSync)
+            extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+#endif
     }
     return extensions;
 }
