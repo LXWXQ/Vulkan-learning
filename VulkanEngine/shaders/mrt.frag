@@ -37,6 +37,8 @@ layout(push_constant) uniform Push {
     mat4 normalMatrix;
     // x = 材质槽位下标，y = 是否有效（0 = 天空盒/网格这类不需要材质的物体）
     uvec2 material;
+    float alphaCutoff;
+    uint alphaMasked;
 } push;
 
 // 你的偏导数法线计算魔法保留在这里！
@@ -98,6 +100,8 @@ void main() {
     // 也不要指望硬件帮你编码（浮点格式不做 sRGB 转换）。
     // 之所以换成浮点：天空盒借道这个通道写 >1.0 的线性 HDR，8bit 会在写入时截断。
     vec4 albedoColor = texture(albedoMaps[nonuniformEXT(matId)], fragUV);
+    if (push.alphaMasked != 0u && albedoColor.a < push.alphaCutoff)
+        discard;
     outAlbedo = vec4(albedoColor.rgb * fragColor, albedoColor.a);
 
     // 4. PBR 参数打包 (R: 金属度, G: 粗糙度)

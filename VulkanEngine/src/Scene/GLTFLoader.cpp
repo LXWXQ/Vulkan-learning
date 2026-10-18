@@ -228,6 +228,8 @@ std::shared_ptr<Model> loadGLTFModel(const GLTFLoadContext& ctx, const std::stri
 
     // ---------------- 材质 ----------------
     std::vector<uint32_t> materialSlots(gltf.materials.size(), kInvalidMaterialSlot);
+    std::vector<uint8_t> materialAlphaMasked(gltf.materials.size(), 0);
+    std::vector<float> materialAlphaCutoff(gltf.materials.size(), 0.5f);
 
     for (size_t i = 0; i < gltf.materials.size(); ++i)
     {
@@ -266,6 +268,8 @@ std::shared_ptr<Model> loadGLTFModel(const GLTFLoadContext& ctx, const std::stri
 
         ctx.materialSystem->buildMaterialDescriptor(mat, *ctx.descriptorManager);
         materialSlots[i] = mat->descriptorSetIndex;
+        materialAlphaMasked[i] = (mat->alphaMode == AlphaMode::MASK_MODE) ? 1u : 0u;
+        materialAlphaCutoff[i] = mat->alphaCutoff;
     }
 
     // ---------------- 几何 ----------------
@@ -399,9 +403,14 @@ std::shared_ptr<Model> loadGLTFModel(const GLTFLoadContext& ctx, const std::stri
                 SubMesh sub{};
                 sub.firstIndex = firstIndex;
                 sub.indexCount = static_cast<uint32_t>(builder.indices.size()) - firstIndex;
-                sub.materialSlot = (prim.material >= 0 && prim.material < static_cast<int>(materialSlots.size()))
-                    ? materialSlots[prim.material]
-                    : kInvalidMaterialSlot;
+                const bool hasMaterial = prim.material >= 0 &&
+                    prim.material < static_cast<int>(materialSlots.size());
+                sub.materialSlot = hasMaterial ? materialSlots[prim.material] : kInvalidMaterialSlot;
+                if (hasMaterial)
+                {
+                    sub.alphaMasked = materialAlphaMasked[prim.material] != 0;
+                    sub.alphaCutoff = materialAlphaCutoff[prim.material];
+                }
 
                 if (sub.indexCount > 0)
                     builder.subMeshes.push_back(sub);

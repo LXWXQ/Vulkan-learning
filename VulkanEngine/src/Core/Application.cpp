@@ -135,7 +135,7 @@ FirstApp::FirstApp(const diag::Options& options)
 	auto bloomPass = std::make_unique<BloomPass>(*vulkanDevice, *renderGraph, *renderResources,
 		descriptorManager.get());
 	auto presentPass = std::make_unique<PresentPass>(*vulkanDevice, *vulkanSwapchain, *renderGraph,
-		*renderResources, descriptorManager.get());
+		*renderResources, descriptorManager.get(), descriptorManager->getGlobalSetLayout());
 
 	auto computeProbePass = std::make_unique<ComputeProbePass>(*vulkanDevice, *renderGraph,
 		descriptorManager.get());
@@ -705,6 +705,8 @@ void FirstApp::loadConfig()
 	{
 		scene->getCameraTransform().translation = cam.position;
 		scene->getCameraTransform().rotation = cam.rotation;
+		// Treat a camera teleport as a cut, not as a giant motion-blur path.
+		hasPreviousViewProjection = false;
 	}
 
 	// 标题是按配置改的，重载之后也要跟着变 —— 否则用户会以为没生效
@@ -824,6 +826,9 @@ void FirstApp::render(float dt)
 
 		GlobalUbo ubo{};
 		ubo.projectionView = scene->getCamera().getProjection() * scene->getCamera().getView();
+		ubo.previousProjectionView = hasPreviousViewProjection
+			? previousViewProjection
+			: ubo.projectionView;
 		ubo.cameraPos = glm::vec4(scene->getCameraTransform().translation, 1.0f);
 		ubo.lightDirection = scene->getSettings().directionalLightDir;
 		ubo.lightColor = scene->getSettings().directionalLightColor;
@@ -883,6 +888,11 @@ void FirstApp::render(float dt)
 		// P1-1：收集本帧的 Tracy GPU zone（必须在命令缓冲结束前）。
 		gpuProfiler.collect(commandBuffer);
 		renderer->endFrame(crossQueue.computeToGraphics, crossQueue.graphicsToCompute);
+
+		// This frame is fully submitted. It becomes the reprojection source for
+		// the next frame's camera motion blur.
+		previousViewProjection = ubo.projectionView;
+		hasPreviousViewProjection = true;
 		if (screenshotCapture.hasPendingCopy())
 		{
 			vkDeviceWaitIdle(vulkanDevice->getDevice());

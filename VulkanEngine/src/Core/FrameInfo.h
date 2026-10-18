@@ -33,6 +33,11 @@ struct GlobalUbo
 	alignas(16) int numLights = 0;
 	float exposure = 1.0f;   // D-2 起光照着色器不再读它，保留字段是为了不动 UBO 布局
 	alignas(16) PointLight pointLights[MAX_POINT_LIGHTS];
+
+	// Previous rendered frame's projection * view. Present uses it to
+	// reproject each pixel's world position into screen space and derive a
+	// camera motion vector for motion blur.
+	glm::mat4 previousProjectionView{ 1.f };
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +54,10 @@ static_assert(offsetof(GlobalUbo, numLights)         == 128, "GlobalUbo.numLight
 static_assert(offsetof(GlobalUbo, exposure)          == 132, "GlobalUbo.exposure 偏移错误");
 static_assert(offsetof(GlobalUbo, pointLights)       == 144, "GlobalUbo.pointLights 偏移错误");
 static_assert(sizeof(PointLight) == 32, "PointLight 应等于两个 vec4 的大小");
-static_assert(sizeof(GlobalUbo) == 144 + MAX_POINT_LIGHTS * sizeof(PointLight), "GlobalUbo 总大小错误");
+static_assert(offsetof(GlobalUbo, previousProjectionView) == 144 + MAX_POINT_LIGHTS * sizeof(PointLight),
+	"GlobalUbo.previousProjectionView offset mismatch");
+static_assert(sizeof(GlobalUbo) == 144 + MAX_POINT_LIGHTS * sizeof(PointLight) + sizeof(glm::mat4),
+	"GlobalUbo size mismatch");
 
 struct SimplePushConstantData
 {
@@ -64,6 +72,8 @@ struct SimplePushConstantData
 	// 用 uint 而不是 int：着色器里直接拿去索引数组，省一次转换。
 	uint32_t materialId = 0;      // 材质槽位下标（kInvalidMaterialSlot 时取 0）
 	uint32_t materialValid = 0;   // 0 = 天空盒/网格这类不需要材质的物体
+	float alphaCutoff = 0.5f;
+	uint32_t alphaMasked = 0;
 
 	// 偏移必须在编译期钉死，否则"某个字段悄悄移位"会导致材质错乱，
 	// 而且这类错乱看起来像"贴图加载错了"，极难往回追。
@@ -71,7 +81,12 @@ struct SimplePushConstantData
 };
 static_assert(offsetof(SimplePushConstantData, materialId)    == SimplePushConstantData::kMaterialOffset,     "materialId 偏移必须紧跟两个 mat4");
 static_assert(offsetof(SimplePushConstantData, materialValid) == SimplePushConstantData::kMaterialOffset + 4, "materialValid 必须紧跟 materialId");
-static_assert(sizeof(SimplePushConstantData) == SimplePushConstantData::kMaterialOffset + 8,                 "push constant 大小必须与 GLSL 的 uvec2 布局一致");
+static_assert(offsetof(SimplePushConstantData, alphaCutoff) == SimplePushConstantData::kMaterialOffset + 8,
+	"alphaCutoff must follow the material uvec2");
+static_assert(offsetof(SimplePushConstantData, alphaMasked) == SimplePushConstantData::kMaterialOffset + 12,
+	"alphaMasked must follow alphaCutoff");
+static_assert(sizeof(SimplePushConstantData) == SimplePushConstantData::kMaterialOffset + 16,
+	"push constant size must match GLSL layout");
 
 struct EngineSettings
 {
@@ -116,6 +131,12 @@ struct EngineSettings
 	float bloomThreshold = 2.2f;
 	float bloomKnee = 0.5f;      // 软膝盖宽度，避免阈值边界出现硬边
 	float bloomIntensity = 0.12f;
+
+	// Camera motion blur. Screen-space velocity comes from reprojecting the
+	// current world position with the previous frame's view-projection matrix.
+	bool  motionBlurEnabled = true;
+	float motionBlurStrength = 1.0f;
+	float motionBlurMaxRadius = 0.035f;
 };
 
 struct RenderTelemetry

@@ -1,11 +1,13 @@
-#include "PresentPass.h"
+﻿#include "PresentPass.h"
 #include "AssetPaths.h"
 #include <stdexcept>
 
 PresentPass::PresentPass(Device& device, Swapchain& swapchain, RenderGraph& graph,
-                         RenderResources& resources, DescriptorManager* descMgr)
+                         RenderResources& resources, DescriptorManager* descMgr,
+                         VkDescriptorSetLayout globalSetLayout)
     : device(device), swapchain(swapchain), renderGraph(graph),
-      resources(resources), descriptorManager(descMgr)
+      resources(resources), descriptorManager(descMgr),
+      globalSetLayout(globalSetLayout)
 {
 }
 
@@ -23,6 +25,8 @@ PresentPass::~PresentPass()
         vkDestroyDescriptorSetLayout(device.getDevice(), noBloomSetLayout, nullptr);
     if (sampler != VK_NULL_HANDLE)
         vkDestroySampler(device.getDevice(), sampler, nullptr);
+    if (positionSampler != VK_NULL_HANDLE)
+        vkDestroySampler(device.getDevice(), positionSampler, nullptr);
 }
 
 void PresentPass::init()
@@ -38,7 +42,13 @@ void PresentPass::init()
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.maxAnisotropy = 1.0f;
     if (vkCreateSampler(device.getDevice(), &si, nullptr, &sampler) != VK_SUCCESS)
-        throw std::runtime_error("PresentPass: 采样器创建失败");
+        throw std::runtime_error("PresentPass: color sampler creation failed");
+
+    // World-position data must not be interpolated across silhouettes.
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_NEAREST;
+    if (vkCreateSampler(device.getDevice(), &si, nullptr, &positionSampler) != VK_SUCCESS)
+        throw std::runtime_error("PresentPass: position sampler creation failed");
 
     for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
     {
@@ -54,13 +64,14 @@ void PresentPass::init()
 
 void PresentPass::updateBloomDescriptor(uint32_t frame)
 {
-    VkDescriptorImageInfo infos[2] = {
+    VkDescriptorImageInfo infos[3] = {
         { sampler, renderGraph.getView(resources.hdrScene[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
         { sampler, renderGraph.getView(resources.bloomResult[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { positionSampler, renderGraph.getView(resources.gbPosition[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
     };
 
-    VkWriteDescriptorSet writes[2]{};
-    for (uint32_t i = 0; i < 2; ++i)
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i)
     {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = sets[frame];
@@ -69,29 +80,33 @@ void PresentPass::updateBloomDescriptor(uint32_t frame)
         writes[i].descriptorCount = 1;
         writes[i].pImageInfo = &infos[i];
     }
-    vkUpdateDescriptorSets(device.getDevice(), 2, writes, 0, nullptr);
+    vkUpdateDescriptorSets(device.getDevice(), 3, writes, 0, nullptr);
 }
 
 void PresentPass::updateNoBloomDescriptor(uint32_t frame)
 {
-    VkDescriptorImageInfo hdrInfo{
-        sampler, renderGraph.getView(resources.hdrScene[frame]),
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    VkDescriptorImageInfo infos[2] = {
+        { sampler, renderGraph.getView(resources.hdrScene[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { positionSampler, renderGraph.getView(resources.gbPosition[frame]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
     };
 
-    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    write.dstSet = noBloomSets[frame];
-    write.dstBinding = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.descriptorCount = 1;
-    write.pImageInfo = &hdrInfo;
-    vkUpdateDescriptorSets(device.getDevice(), 1, &write, 0, nullptr);
+    VkWriteDescriptorSet writes[2]{};
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = noBloomSets[frame];
+        writes[i].dstBinding = i;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].descriptorCount = 1;
+        writes[i].pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(device.getDevice(), 2, writes, 0, nullptr);
 }
 
 void PresentPass::createDescriptorLayout()
 {
-    VkDescriptorSetLayoutBinding bloomBindings[2]{};
-    for (uint32_t i = 0; i < 2; ++i)
+    VkDescriptorSetLayoutBinding bloomBindings[3]{};
+    for (uint32_t i = 0; i < 3; ++i)
     {
         bloomBindings[i].binding = i;
         bloomBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -100,22 +115,25 @@ void PresentPass::createDescriptorLayout()
     }
 
     VkDescriptorSetLayoutCreateInfo bloomInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    bloomInfo.bindingCount = 2;
+    bloomInfo.bindingCount = 3;
     bloomInfo.pBindings = bloomBindings;
     if (vkCreateDescriptorSetLayout(device.getDevice(), &bloomInfo, nullptr, &setLayout) != VK_SUCCESS)
-        throw std::runtime_error("PresentPass: Bloom 描述符集布局创建失败");
+        throw std::runtime_error("PresentPass: bloom descriptor layout creation failed");
 
-    VkDescriptorSetLayoutBinding noBloomBinding{};
-    noBloomBinding.binding = 0;
-    noBloomBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    noBloomBinding.descriptorCount = 1;
-    noBloomBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutBinding noBloomBindings[2]{};
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        noBloomBindings[i].binding = i;
+        noBloomBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        noBloomBindings[i].descriptorCount = 1;
+        noBloomBindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
 
     VkDescriptorSetLayoutCreateInfo noBloomInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    noBloomInfo.bindingCount = 1;
-    noBloomInfo.pBindings = &noBloomBinding;
+    noBloomInfo.bindingCount = 2;
+    noBloomInfo.pBindings = noBloomBindings;
     if (vkCreateDescriptorSetLayout(device.getDevice(), &noBloomInfo, nullptr, &noBloomSetLayout) != VK_SUCCESS)
-        throw std::runtime_error("PresentPass: NoBloom 描述符集布局创建失败");
+        throw std::runtime_error("PresentPass: no-bloom descriptor layout creation failed");
 }
 
 void PresentPass::createPipeline()
@@ -125,21 +143,23 @@ void PresentPass::createPipeline()
     range.offset = 0;
     range.size = sizeof(PresentPush);
 
+    VkDescriptorSetLayout bloomSetLayouts[] = { globalSetLayout, setLayout };
     VkPipelineLayoutCreateInfo bloomLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    bloomLayoutInfo.setLayoutCount = 1;
-    bloomLayoutInfo.pSetLayouts = &setLayout;
+    bloomLayoutInfo.setLayoutCount = 2;
+    bloomLayoutInfo.pSetLayouts = bloomSetLayouts;
     bloomLayoutInfo.pushConstantRangeCount = 1;
     bloomLayoutInfo.pPushConstantRanges = &range;
     if (vkCreatePipelineLayout(device.getDevice(), &bloomLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
-        throw std::runtime_error("PresentPass: Bloom 管线布局创建失败");
+        throw std::runtime_error("PresentPass: bloom pipeline layout creation failed");
 
+    VkDescriptorSetLayout noBloomSetLayouts[] = { globalSetLayout, noBloomSetLayout };
     VkPipelineLayoutCreateInfo noBloomLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    noBloomLayoutInfo.setLayoutCount = 1;
-    noBloomLayoutInfo.pSetLayouts = &noBloomSetLayout;
+    noBloomLayoutInfo.setLayoutCount = 2;
+    noBloomLayoutInfo.pSetLayouts = noBloomSetLayouts;
     noBloomLayoutInfo.pushConstantRangeCount = 1;
     noBloomLayoutInfo.pPushConstantRanges = &range;
     if (vkCreatePipelineLayout(device.getDevice(), &noBloomLayoutInfo, nullptr, &noBloomPipelineLayout) != VK_SUCCESS)
-        throw std::runtime_error("PresentPass: NoBloom 管线布局创建失败");
+        throw std::runtime_error("PresentPass: no-bloom pipeline layout creation failed");
 
     PipelineConfigInfo config{};
     Pipeline::defaultPipelineConfigInfo(config, WIDTH, HEIGHT);
@@ -197,6 +217,7 @@ void PresentPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     pass.read(resources.hdrScene[frame]);
     if (bloomEnabled)
         pass.read(resources.bloomResult[frame]);
+    pass.read(resources.gbPosition[frame]);
 
     pass.writeColor(resources.swapchainImages[frameInfo.swapchainImageIndex],
         VK_ATTACHMENT_LOAD_OP_DONT_CARE);
@@ -205,22 +226,29 @@ void PresentPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     push.exposure = frameInfo.settings.exposure;
     push.bloomIntensity = bloomEnabled ? frameInfo.settings.bloomIntensity : 0.0f;
     push.bloomEnabled = bloomEnabled ? 1.0f : 0.0f;
+    push.motionBlurEnabled = frameInfo.settings.motionBlurEnabled ? 1.0f : 0.0f;
+    push.motionBlurStrength = frameInfo.settings.motionBlurStrength;
+    push.motionBlurMaxRadius = frameInfo.settings.motionBlurMaxRadius;
+    push.motionBlurFrame = static_cast<float>(frameInfo.frameNumber % 4096u);
 
-    pass.execute([this, push, frame, bloomEnabled](VkCommandBuffer cmd)
+    const VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet(frame);
+    pass.execute([this, push, frame, bloomEnabled, globalSet](VkCommandBuffer cmd)
     {
         if (bloomEnabled)
         {
             pipeline->bind(cmd);
+            VkDescriptorSet descriptorSets[] = { globalSet, sets[frame] };
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                0, 1, &sets[frame], 0, nullptr);
+                0, 2, descriptorSets, 0, nullptr);
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(push), &push);
         }
         else
         {
             noBloomPipeline->bind(cmd);
+            VkDescriptorSet descriptorSets[] = { globalSet, noBloomSets[frame] };
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, noBloomPipelineLayout,
-                0, 1, &noBloomSets[frame], 0, nullptr);
+                0, 2, descriptorSets, 0, nullptr);
             vkCmdPushConstants(cmd, noBloomPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(push), &push);
         }

@@ -117,6 +117,11 @@ private:
 
 	std::unique_ptr<Texture> environmentTex;
 
+	// Last successfully rendered camera view-projection. PresentPass uses it
+	// to compute screen-space camera motion vectors.
+	glm::mat4 previousViewProjection{ 1.0f };
+	bool hasPreviousViewProjection = false;
+
 	std::chrono::high_resolution_clock::time_point currentTime;
 	std::chrono::high_resolution_clock::time_point lastPerfLog;
 	uint32_t framesSincePerfLog = 0;

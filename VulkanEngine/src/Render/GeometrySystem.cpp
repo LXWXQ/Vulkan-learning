@@ -149,6 +149,8 @@ void GeometrySystem::render(VkCommandBuffer commandBuffer, FrameInfo& frameInfo)
             }
 
             push.materialId = (slot == kInvalidMaterialSlot) ? fallbackMatId : slot;
+            push.alphaMasked = subMesh.alphaMasked ? 1u : 0u;
+            push.alphaCutoff = subMesh.alphaCutoff;
             vkCmdPushConstants(commandBuffer, pipelineLayout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(SimplePushConstantData), &push);

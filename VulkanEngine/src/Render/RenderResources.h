@@ -29,6 +29,7 @@ struct RenderResources
     std::array<RenderGraph::TextureHandle, kFramesInFlight> gbPbr;
     std::array<RenderGraph::TextureHandle, kFramesInFlight> gbDepth;
 
+    std::array<RenderGraph::TextureHandle, kFramesInFlight> ssaoRaw;
     std::array<RenderGraph::TextureHandle, kFramesInFlight> ssao;
 
     // 光照终点：每帧一份线性 HDR 中间目标。

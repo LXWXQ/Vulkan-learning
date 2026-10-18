@@ -49,6 +49,8 @@ private:
     void createUniformBuffer();
     void createLocalDescriptors();
     void createPipeline();
+    void createBlurPipeline();
+    void updateBlurDescriptor(uint32_t frame);
 
     Device& device;
     RenderGraph& renderGraph;
@@ -77,4 +79,9 @@ private:
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     std::unique_ptr<Pipeline> ssaoPipeline;
+
+    VkDescriptorSetLayout blurSetLayout = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kFramesInFlight> blurSets{};
+    VkPipelineLayout blurPipelineLayout = VK_NULL_HANDLE;
+    std::unique_ptr<Pipeline> blurPipeline;
 };

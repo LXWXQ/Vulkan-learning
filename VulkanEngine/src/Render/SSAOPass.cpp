@@ -30,6 +30,10 @@ SSAOPass::~SSAOPass()
     if (noiseTexture.view != VK_NULL_HANDLE) vkDestroyImageView(device.getDevice(), noiseTexture.view, nullptr);
     if (noiseTexture.image != VK_NULL_HANDLE) vmaDestroyImage(device.getVmaAllocator(), noiseTexture.image, noiseTexture.allocation);
 
+    blurPipeline.reset();
+    if (blurPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device.getDevice(), blurPipelineLayout, nullptr);
+    if (blurSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device.getDevice(), blurSetLayout, nullptr);
+
     if (outputSampler != VK_NULL_HANDLE) vkDestroySampler(device.getDevice(), outputSampler, nullptr);
 }
 
@@ -44,10 +48,13 @@ void SSAOPass::init()
     for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
     {
         RenderGraph::TextureDesc desc;
-        desc.name = "SSAO.Frame" + std::to_string(frame);
+        desc.name = "SSAO.Raw.Frame" + std::to_string(frame);
         desc.format = VK_FORMAT_R8_UNORM;
         desc.extent = renderGraph.getExtent(resources.gbPosition[frame]);
         desc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        resources.ssaoRaw[frame] = renderGraph.createTexture(desc);
+
+        desc.name = "SSAO.Frame" + std::to_string(frame);
         resources.ssao[frame] = renderGraph.createTexture(desc);
     }
 
@@ -69,6 +76,7 @@ void SSAOPass::init()
     createUniformBuffer();
     createLocalDescriptors();
     createPipeline();
+    createBlurPipeline();
 }
 
 void SSAOPass::generateSampleKernel()
@@ -267,6 +275,61 @@ void SSAOPass::createLocalDescriptors()
     }
 }
 
+void SSAOPass::updateBlurDescriptor(uint32_t frame)
+{
+    if (blurSets[frame] == VK_NULL_HANDLE)
+        return;
+
+    VkDescriptorImageInfo aoInfo{
+        outputSampler,
+        renderGraph.getView(resources.ssaoRaw[frame]),
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.dstSet = blurSets[frame];
+    write.dstBinding = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorCount = 1;
+    write.pImageInfo = &aoInfo;
+    vkUpdateDescriptorSets(device.getDevice(), 1, &write, 0, nullptr);
+}
+
+void SSAOPass::createBlurPipeline()
+{
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    blurSetLayout = descriptorManager->createSetLayout({ binding });
+
+    for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        blurSets[frame] = descriptorManager->allocateSet(blurSetLayout);
+        updateBlurDescriptor(frame);
+    }
+
+    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &blurSetLayout;
+    if (vkCreatePipelineLayout(device.getDevice(), &layoutInfo, nullptr, &blurPipelineLayout) != VK_SUCCESS)
+        throw std::runtime_error("SSAOPass: blur pipeline layout creation failed");
+
+    PipelineConfigInfo config{};
+    Pipeline::defaultPipelineConfigInfo(config, WIDTH, HEIGHT);
+    config.colorAttachmentFormats = { VK_FORMAT_R8_UNORM };
+    config.pipelineLayout = blurPipelineLayout;
+    config.bindingDescriptions.clear();
+    config.attributeDescriptions.clear();
+    config.depthStencilInfo.depthTestEnable = VK_FALSE;
+    config.depthStencilInfo.depthWriteEnable = VK_FALSE;
+
+    blurPipeline = std::make_unique<Pipeline>(device,
+        SENTINEL_SHADER_DIR "fullscreen.vert.spv",
+        SENTINEL_SHADER_DIR "ssao_blur.frag.spv", config);
+}
+
 void SSAOPass::createPipeline()
 {
     std::array<VkDescriptorSetLayout, 2> layouts = { globalSetLayout, localSetLayout };
@@ -292,7 +355,11 @@ void SSAOPass::createPipeline()
 void SSAOPass::resize(VkExtent2D extent)
 {
     for (uint32_t frame = 0; frame < kFramesInFlight; ++frame)
+    {
+        renderGraph.resizeOwnedTexture(resources.ssaoRaw[frame], extent);
         renderGraph.resizeOwnedTexture(resources.ssao[frame], extent);
+        updateBlurDescriptor(frame);
+    }
 }
 
 void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
@@ -317,7 +384,7 @@ void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
     auto& pass = graph.addGraphicsPass("SSAO");
     pass.read(resources.gbPosition[frame]);
     pass.read(resources.gbNormal[frame]);
-    pass.writeColor(resources.ssao[frame], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
+    pass.writeColor(resources.ssaoRaw[frame], VK_ATTACHMENT_LOAD_OP_CLEAR, clear);
 
     // 注意：这里**故意不调用 pass.setEnabled(ssaoEnabled)**。
     //
@@ -346,6 +413,20 @@ void SSAOPass::addToGraph(RenderGraph& graph, FrameInfo& frameInfo)
         VkDescriptorSet globalSet = frameInfo.descriptorManager->getGlobalSet(frame);
         VkDescriptorSet sets[] = { globalSet, localSets[frame] };
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 2, sets, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    });
+
+    // SSAO uses a 4x4 noise texture to rotate its kernel. Without a
+    // post-filter that noise becomes visible as a fine screen-space pattern
+    // on distant, low-contrast surfaces. Blur the raw AO before Lighting reads it.
+    auto& blurPass = graph.addGraphicsPass("SSAOBlur");
+    blurPass.read(resources.ssaoRaw[frame]);
+    blurPass.writeColor(resources.ssao[frame], VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+    blurPass.execute([this, frame](VkCommandBuffer cmd)
+    {
+        blurPipeline->bind(cmd);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout,
+            0, 1, &blurSets[frame], 0, nullptr);
         vkCmdDraw(cmd, 3, 1, 0, 0);
     });
 }

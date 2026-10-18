@@ -7,6 +7,15 @@ layout(location = 0) out vec4 outPosition;
 layout(location = 1) out vec4 outNormal;
 layout(location = 2) out vec4 outAlbedo;
 layout(location = 3) out vec4 outPBR;
+
+layout(set = 0, binding = 0) uniform GlobalUbo {
+    mat4 projectionView;
+    vec4 ambientLightColor;
+    vec4 lightDirection;
+    vec4 lightColor;
+    vec4 cameraPos;
+} ubo;
+
 layout(set = 0, binding = 1) uniform sampler2D environmentMap;
 const vec2 invAtan = vec2(0.1591, 0.3183);
 
@@ -42,6 +51,8 @@ void main() {
     outNormal = vec4(0.0, 0.0, 0.0, 1.0);
     
     // 5. 其余通道填 0 确保安全
-    outPosition = vec4(0.0);
+    // 5. Store a far point along the sky direction so the motion-blur
+    // reprojection pass gets a valid camera-relative world position.
+    outPosition = vec4(ubo.cameraPos.xyz + normalize(inUVW) * 10000.0, 1.0);
     outPBR = vec4(0.0);
 }

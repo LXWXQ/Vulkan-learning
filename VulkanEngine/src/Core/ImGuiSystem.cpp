@@ -74,6 +74,7 @@ void ImGuiSystem::prepareDrawData(FrameInfo& frameInfo)
 	renderSSAOPanel(frameInfo.settings);
 	renderLightingPanel(frameInfo.settings);
 	renderBloomPanel(frameInfo.settings);
+	renderMotionBlurPanel(frameInfo.settings);
 
 	if (frameInfo.cameraTransform)
 		renderCameraPanel(*frameInfo.cameraTransform, frameInfo.cameraController);
@@ -152,6 +153,22 @@ void ImGuiSystem::renderBloomPanel(EngineSettings& settings)
 	ImGui::SliderFloat("Soft Knee", &settings.bloomKnee, 0.01f, 2.0f, "%.2f");
 	ImGui::SliderFloat("Intensity", &settings.bloomIntensity, 0.0f, 0.5f, "%.3f");
 	ImGui::Unindent();
+}
+
+void ImGuiSystem::renderMotionBlurPanel(EngineSettings& settings)
+{
+	if (!ImGui::CollapsingHeader("Motion Blur"))
+		return;
+
+	ImGui::Checkbox("Enable Motion Blur", &settings.motionBlurEnabled);
+	if (settings.motionBlurEnabled)
+	{
+		ImGui::Indent();
+		ImGui::SliderFloat("Strength", &settings.motionBlurStrength, 0.0f, 2.0f, "%.2f");
+		ImGui::SliderFloat("Max Radius", &settings.motionBlurMaxRadius, 0.005f, 0.15f, "%.3f");
+		ImGui::TextDisabled("Camera reprojection blur (10 samples)");
+		ImGui::Unindent();
+	}
 }
 
 void ImGuiSystem::renderCameraPanel(TransformComponent& cameraTransform, CameraController* controller)

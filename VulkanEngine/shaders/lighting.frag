@@ -146,7 +146,8 @@ void main() {
     // 漫反射：直接用预烘焙的 irradiance cubemap（已做余弦卷积）
     // 镜面  ：prefiltered cubemap（按粗糙度选 mip）x BRDF 积分表
     // 原来那句 envSpecular *= (1.0 - roughness) 是能量不守恒的粗糙近似，已替换。
-    vec3 F_ambient = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
+    float NdotV = max(dot(N, V), 0.0);
+    vec3 F_ambient = fresnelSchlickRoughness(NdotV, F0, roughness);
     vec3 kD_ambient = (vec3(1.0) - F_ambient) * (1.0 - metallic);
 
     vec3 irradiance = texture(irradianceMap, N).rgb;
@@ -156,8 +157,14 @@ void main() {
     const float MAX_REFLECTION_LOD = 4.0;
     vec3 R = reflect(-V, N);
     vec3 prefiltered = textureLod(prefilteredMap, R, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2 brdf = texture(brdfLut, vec2(max(dot(N, V), 0.0), roughness)).rg;
+    vec2 brdf = texture(brdfLut, vec2(NdotV, roughness)).rg;
     vec3 specularIBL = prefiltered * (F_ambient * brdf.x + brdf.y);
+
+    // Fresnel approaches 1.0 at grazing angles. With a bright environment
+    // that turns every silhouette into a hard white rim. Keep some grazing
+    // response, but suppress the saturated outline.
+    float grazingSpecular = mix(0.12, 1.0, smoothstep(0.0, 0.25, NdotV));
+    specularIBL *= grazingSpecular;
 
     vec3 ambient = kD_ambient * diffuseIBL + specularIBL;
 

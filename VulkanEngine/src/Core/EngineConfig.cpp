@@ -101,6 +101,12 @@ namespace
 		bloom["intensity"] = s.bloomIntensity;
 		j["bloom"] = std::move(bloom);
 
+		json motionBlur;
+		motionBlur["enabled"] = s.motionBlurEnabled;
+		motionBlur["strength"] = s.motionBlurStrength;
+		motionBlur["maxRadius"] = s.motionBlurMaxRadius;
+		j["motionBlur"] = std::move(motionBlur);
+
 		json light;
 		writeVec(light, "direction", s.directionalLightDir);
 		writeVec(light, "color", s.directionalLightColor);
@@ -137,6 +143,14 @@ namespace
 			out.bloomThreshold = read(n, "threshold", out.bloomThreshold, warnings);
 			out.bloomKnee = read(n, "knee", out.bloomKnee, warnings);
 			out.bloomIntensity = read(n, "intensity", out.bloomIntensity, warnings);
+		}
+
+		if (j.contains("motionBlur") && j["motionBlur"].is_object())
+		{
+			const json& n = j["motionBlur"];
+			out.motionBlurEnabled = read(n, "enabled", out.motionBlurEnabled, warnings);
+			out.motionBlurStrength = read(n, "strength", out.motionBlurStrength, warnings);
+			out.motionBlurMaxRadius = read(n, "maxRadius", out.motionBlurMaxRadius, warnings);
 		}
 
 		if (j.contains("lighting") && j["lighting"].is_object())

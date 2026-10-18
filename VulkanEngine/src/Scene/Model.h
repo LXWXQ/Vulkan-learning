@@ -89,6 +89,11 @@ struct SubMesh
     // 该子网格使用的材质槽位。为 kInvalidMaterialSlot 表示"未指定"，
     // 渲染时回退到所属实体的 MaterialComponent::materialSetIndex。
     uint32_t materialSlot = kInvalidMaterialSlot;
+
+    // glTF alpha-mask metadata. Foliage must discard transparent texels or
+    // the opaque white background of the leaf atlas becomes a visible fringe.
+    bool alphaMasked = false;
+    float alphaCutoff = 0.5f;
 };
 
 class Model

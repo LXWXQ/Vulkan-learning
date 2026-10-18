@@ -382,6 +382,9 @@ void Device::createLogicalDevice()
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.dynamicRendering = VK_TRUE;
     features13.synchronization2 = VK_TRUE;
+    // glslang lowers `discard` to OpDemoteToHelperInvocation for Vulkan 1.3.
+    // Alpha-masked foliage needs discard, so enable the matching core feature.
+    features13.shaderDemoteToHelperInvocation = VK_TRUE;
     features13.pNext = &features12;        // 1.3 -> 1.2 串起来
 
     // 注意：用 Features2 链传递特性时，pEnabledFeatures 必须为 null，
